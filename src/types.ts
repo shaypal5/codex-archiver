@@ -6,7 +6,7 @@ export type StorageKind =
   | "mixed";
 
 export type RestoreStatus =
-  | "viewable"
+  | "active"
   | "archived"
   | "hidden"
   | "orphaned"
@@ -32,7 +32,7 @@ export interface ThreadRecord {
 export interface ScanStats {
   totalThreads: number;
   totalProjects: number;
-  viewableThreads: number;
+  activeThreads: number;
   archivedThreads: number;
   hiddenThreads: number;
   orphanedThreads: number;

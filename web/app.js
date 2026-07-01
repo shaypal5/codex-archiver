@@ -2,7 +2,7 @@ const elements = {
   scanMeta: document.querySelector("#scan-meta"),
   totalThreads: document.querySelector("#total-threads"),
   totalProjects: document.querySelector("#total-projects"),
-  viewableThreads: document.querySelector("#viewable-threads"),
+  activeThreads: document.querySelector("#active-threads"),
   diagnostics: document.querySelector("#diagnostics"),
   threads: document.querySelector("#threads"),
   refresh: document.querySelector("#refresh"),
@@ -38,7 +38,10 @@ async function rebuild() {
   elements.refresh.disabled = true;
   elements.refresh.textContent = "Refreshing...";
   try {
-    scan = await fetchJson("/api/index/rebuild", { method: "POST" });
+    scan = await fetchJson("/api/index/rebuild", {
+      method: "POST",
+      headers: { "X-Codex-Archiver-Intent": "local-api" },
+    });
     renderSummary(scan);
     await loadThreads();
   } finally {
@@ -60,7 +63,7 @@ async function loadThreads() {
 function renderSummary(data) {
   elements.totalThreads.textContent = number(data.stats.totalThreads);
   elements.totalProjects.textContent = number(data.stats.totalProjects);
-  elements.viewableThreads.textContent = number(data.stats.viewableThreads);
+  elements.activeThreads.textContent = number(data.stats.activeThreads);
   elements.scanMeta.textContent = `Scanned ${data.codexHome} at ${new Date(
     data.scannedAt,
   ).toLocaleString()}`;

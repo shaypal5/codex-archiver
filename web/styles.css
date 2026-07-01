@@ -203,7 +203,7 @@ td {
   text-transform: capitalize;
 }
 
-.status.viewable {
+.status.active {
   background: #dceee8;
   color: #245448;
 }

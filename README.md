@@ -20,7 +20,7 @@ Then open:
 http://127.0.0.1:8976
 ```
 
-The first screen shows summary badges for total threads, total projects, and viewable threads, followed by separate filters for thread names, content previews, project paths, and restoration status.
+The first screen shows summary badges for total threads, total projects, and active indexed threads, followed by separate filters for thread names, content previews, project paths, and restoration status.
 
 ## CLI
 

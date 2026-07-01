@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { access, readdir, stat } from "node:fs/promises";
+import { access, readdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -206,6 +206,7 @@ async function readJsonlThread(
   let createdAt: number | null = null;
   let updatedAt: number | null = null;
   const textParts: string[] = [];
+  let previewLength = 0;
 
   try {
     const rl = createInterface({
@@ -238,6 +239,7 @@ async function readJsonlThread(
       title ??= firstStringAt(value, [
         ["title"],
         ["payload", "title"],
+        ["payload", "thread_name"],
         ["session", "title"],
       ]);
       cwd ??= firstStringAt(value, [
@@ -252,11 +254,12 @@ async function readJsonlThread(
         updatedAt = updatedAt === null ? timestamp : Math.max(updatedAt, timestamp);
       }
 
-      const messageText = extractText(value);
-      if (messageText) {
+      const messageText = extractTranscriptMessage(value);
+      if (messageText !== null) {
         messageCount += 1;
-        if (textParts.join(" ").length < 4000) {
+        if (previewLength < 4000 && messageText) {
           textParts.push(messageText);
+          previewLength += messageText.length + 1;
         }
       }
     }
@@ -385,7 +388,7 @@ function finalizeThread(thread: MutableThread): ThreadRecord {
 
 function determineRestoreStatus(thread: MutableThread): RestoreStatus {
   if (thread.archived === false && thread.existsOnDisk) {
-    return "viewable";
+    return "active";
   }
   if (thread.archived === true && thread.existsOnDisk) {
     return "archived";
@@ -418,7 +421,7 @@ function buildStats(threads: ThreadRecord[]): ScanStats {
   return {
     totalThreads: threads.length,
     totalProjects: new Set(threads.map((thread) => thread.cwd).filter(Boolean)).size,
-    viewableThreads: threads.filter((thread) => thread.restoreStatus === "viewable").length,
+    activeThreads: threads.filter((thread) => thread.restoreStatus === "active").length,
     archivedThreads: threads.filter((thread) => thread.restoreStatus === "archived").length,
     hiddenThreads: threads.filter((thread) => thread.restoreStatus === "hidden").length,
     orphanedThreads: threads.filter((thread) => thread.restoreStatus === "orphaned").length,
@@ -521,44 +524,50 @@ function cleanString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function extractText(value: unknown): string {
-  const out: string[] = [];
-  collectText(value, out, 0);
-  return normalizeWhitespace(out.join(" "));
-}
+function extractTranscriptMessage(value: unknown): string | null {
+  if (!isRecord(value) || value.type !== "response_item" || !isRecord(value.payload)) {
+    return null;
+  }
 
-function collectText(value: unknown, out: string[], depth: number): void {
-  if (depth > 8 || out.join(" ").length > 4000) {
-    return;
+  const payload = value.payload;
+  if (payload.type !== "message") {
+    return null;
   }
-  if (typeof value === "string") {
-    if (value.length > 2 && !looksLikePath(value) && !looksLikeIdentifier(value)) {
-      out.push(value);
-    }
-    return;
+  if (payload.role !== "user" && payload.role !== "assistant") {
+    return null;
   }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      collectText(item, out, depth + 1);
-    }
-    return;
+  if (!Array.isArray(payload.content)) {
+    return "";
   }
-  if (isRecord(value)) {
-    for (const [key, nested] of Object.entries(value)) {
-      if (["id", "thread_id", "threadId", "cwd", "rollout_path"].includes(key)) {
-        continue;
+
+  const text = payload.content
+    .map((item) => {
+      if (!isRecord(item)) {
+        return "";
       }
-      collectText(nested, out, depth + 1);
-    }
+      if (item.type !== "input_text" && item.type !== "output_text") {
+        return "";
+      }
+      return typeof item.text === "string" ? item.text : "";
+    })
+    .filter(Boolean)
+    .join(" ");
+
+  const normalized = normalizeWhitespace(text);
+  if (payload.role === "user" && isSyntheticUserContext(normalized)) {
+    return null;
   }
+
+  return normalized;
 }
 
-function looksLikePath(value: string): boolean {
-  return value.startsWith("/") || value.startsWith("~/") || value.includes("/.codex/");
-}
-
-function looksLikeIdentifier(value: string): boolean {
-  return /^[0-9a-f-]{20,}$/i.test(value);
+function isSyntheticUserContext(text: string): boolean {
+  return (
+    text.startsWith("# AGENTS.md instructions") ||
+    text.startsWith("<environment_context>") ||
+    text.startsWith("<INSTRUCTIONS>") ||
+    text.startsWith("<permissions instructions>")
+  );
 }
 
 function normalizeWhitespace(value: string): string {
