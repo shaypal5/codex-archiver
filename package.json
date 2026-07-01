@@ -1,0 +1,22 @@
+{
+  "name": "codex-archiver",
+  "version": "0.1.0",
+  "description": "Local browser and restoration tooling for Codex Desktop threads.",
+  "type": "module",
+  "bin": {
+    "codex-archiver": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "start": "node dist/cli.js serve",
+    "scan": "node dist/cli.js scan"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "typescript": "^5.5.3"
+  }
+}
