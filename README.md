@@ -41,6 +41,42 @@ node dist/cli.js serve --codex-home /path/to/.codex
 node dist/cli.js scan --codex-home /path/to/.codex
 ```
 
+## Search Index
+
+The web UI uses a persistent local SQLite/FTS5 search index at:
+
+```text
+~/.cache/codex-archiver/index.sqlite
+```
+
+Build or refresh it with:
+
+```bash
+node dist/cli.js index rebuild
+```
+
+Inspect it with:
+
+```bash
+node dist/cli.js index status
+```
+
+Clear it with:
+
+```bash
+node dist/cli.js index clear
+```
+
+See [docs/search-index.md](docs/search-index.md) for details.
+
+## CI
+
+Pull requests run GitHub Actions CI with:
+
+- `npm ci`
+- `npm run check`
+- `npm test`
+
 ## Safety
 
 This first version is intentionally read-only. Restore planning and backup-backed mutation will be added in later PRs.

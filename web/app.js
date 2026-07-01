@@ -5,6 +5,9 @@ const elements = {
   activeThreads: document.querySelector("#active-threads"),
   diagnostics: document.querySelector("#diagnostics"),
   threads: document.querySelector("#threads"),
+  resultCount: document.querySelector("#result-count"),
+  prevPage: document.querySelector("#prev-page"),
+  nextPage: document.querySelector("#next-page"),
   refresh: document.querySelector("#refresh"),
   title: document.querySelector("#title-filter"),
   content: document.querySelector("#content-filter"),
@@ -14,6 +17,8 @@ const elements = {
 
 let scan = null;
 let filterTimer = null;
+let offset = 0;
+const limit = 100;
 
 elements.refresh.addEventListener("click", async () => {
   await rebuild();
@@ -21,10 +26,21 @@ elements.refresh.addEventListener("click", async () => {
 
 for (const input of [elements.title, elements.content, elements.cwd, elements.status]) {
   input.addEventListener("input", () => {
+    offset = 0;
     clearTimeout(filterTimer);
     filterTimer = setTimeout(loadThreads, 150);
   });
 }
+
+elements.prevPage.addEventListener("click", async () => {
+  offset = Math.max(0, offset - limit);
+  await loadThreads();
+});
+
+elements.nextPage.addEventListener("click", async () => {
+  offset += limit;
+  await loadThreads();
+});
 
 await loadDiagnostics();
 await loadThreads();
@@ -56,15 +72,18 @@ async function loadThreads() {
   setParam(params, "content", elements.content.value);
   setParam(params, "cwd", elements.cwd.value);
   setParam(params, "status", elements.status.value);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
   const data = await fetchJson(`/api/threads?${params.toString()}`);
   renderThreads(data.threads);
+  renderPagination(data);
 }
 
 function renderSummary(data) {
   elements.totalThreads.textContent = number(data.stats.totalThreads);
   elements.totalProjects.textContent = number(data.stats.totalProjects);
   elements.activeThreads.textContent = number(data.stats.activeThreads);
-  elements.scanMeta.textContent = `Scanned ${data.codexHome} at ${new Date(
+  elements.scanMeta.textContent = `Indexed ${data.codexHome} at ${new Date(
     data.scannedAt,
   ).toLocaleString()}`;
   elements.diagnostics.replaceChildren(
@@ -101,6 +120,16 @@ function renderThreads(threads) {
       return row;
     }),
   );
+}
+
+function renderPagination(data) {
+  const start = data.totalMatches === 0 ? 0 : data.offset + 1;
+  const end = Math.min(data.offset + data.threads.length, data.totalMatches);
+  elements.resultCount.textContent = `${number(start)}-${number(end)} of ${number(
+    data.totalMatches,
+  )} matching threads`;
+  elements.prevPage.disabled = data.offset <= 0;
+  elements.nextPage.disabled = data.offset + data.limit >= data.totalMatches;
 }
 
 function threadCell(thread) {

@@ -14,3 +14,7 @@ export function expandHome(input: string): string {
 export function defaultCodexHome(): string {
   return path.join(os.homedir(), ".codex");
 }
+
+export function defaultIndexPath(): string {
+  return path.join(os.homedir(), ".cache", "codex-archiver", "index.sqlite");
+}

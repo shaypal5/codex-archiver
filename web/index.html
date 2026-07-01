@@ -11,7 +11,7 @@
       <header class="topbar">
         <div>
           <h1>Codex Archiver</h1>
-          <p id="scan-meta">Loading local Codex storage...</p>
+          <p id="scan-meta">Loading local search index...</p>
         </div>
         <button id="refresh" type="button">Refresh</button>
       </header>
@@ -59,6 +59,14 @@
       </section>
 
       <section class="diagnostics" id="diagnostics" aria-live="polite"></section>
+
+      <section class="results-bar" aria-label="Search results">
+        <span id="result-count">No results loaded.</span>
+        <div class="pager">
+          <button id="prev-page" type="button">Previous</button>
+          <button id="next-page" type="button">Next</button>
+        </div>
+      </section>
 
       <section class="table-wrap">
         <table>
