@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Archiver</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Codex Archiver</h1>
+          <p id="scan-meta">Loading local Codex storage...</p>
+        </div>
+        <button id="refresh" type="button">Refresh</button>
+      </header>
+
+      <section class="badges" aria-label="Thread summary">
+        <article class="badge">
+          <span>Total threads</span>
+          <strong id="total-threads">-</strong>
+        </article>
+        <article class="badge">
+          <span>Total projects</span>
+          <strong id="total-projects">-</strong>
+        </article>
+        <article class="badge">
+          <span>Active indexed threads</span>
+          <strong id="active-threads">-</strong>
+        </article>
+      </section>
+
+      <section class="filters" aria-label="Filters">
+        <label>
+          Thread name
+          <input id="title-filter" type="search" placeholder="Search titles" />
+        </label>
+        <label>
+          Content
+          <input id="content-filter" type="search" placeholder="Search previews" />
+        </label>
+        <label>
+          Project path
+          <input id="cwd-filter" type="search" placeholder="Filter cwd" />
+        </label>
+        <label>
+          Status
+          <select id="status-filter">
+            <option value="all">All</option>
+            <option value="active">Active indexed</option>
+            <option value="archived">Archived</option>
+            <option value="hidden">Hidden</option>
+            <option value="orphaned">Orphaned</option>
+            <option value="restorable">Restorable</option>
+            <option value="unknown">Unknown</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="diagnostics" id="diagnostics" aria-live="polite"></section>
+
+      <section class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Thread</th>
+              <th>Status</th>
+              <th>Project</th>
+              <th>Updated</th>
+              <th>Messages</th>
+            </tr>
+          </thead>
+          <tbody id="threads"></tbody>
+        </table>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
