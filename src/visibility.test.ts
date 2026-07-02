@@ -269,6 +269,25 @@ test("app-server probe records malformed responses as non-fatal warnings", async
   assert.equal(result.summary.appServerVisible, 0);
 });
 
+test("app-server probe does not classify visibility by title or cwd text fallback", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for app-server classification tests");
+    return;
+  }
+
+  const fixture = await createFixture(t);
+  const appServer = await createMockThreadListServer(t, () => ({
+    threads: [{ thread_id: "unrelated-thread", title: "Missing Thread", cwd: "/tmp/project-c" }],
+  }));
+
+  const result = await diagnoseWithAppServer(fixture, appServer.url);
+  const probe = appServerProbe(result);
+  assert.equal(probe.status, "available");
+  assert.equal(probe.visibleCount, 1);
+  assert.equal(result.summary.appServerVisible, 0);
+  assert.equal(result.threads.find((thread) => thread.id === "missing-thread")?.appServerVisible, false);
+});
+
 test("app-server probe reports timeout, failure, and unavailable states without throwing", async (t) => {
   if (!hasSqliteCli()) {
     t.skip("sqlite3 CLI is required for app-server failure tests");

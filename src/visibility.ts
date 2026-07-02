@@ -41,6 +41,8 @@ const APP_SERVER_NESTED_KEYS = [
   "thread",
   "session",
 ];
+const APP_SERVER_ENVELOPE_KEYS = ["result", "payload", "data", "response", "body"];
+const APP_SERVER_PAGINATION_CONTAINER_KEYS = ["pagination", "pageInfo", "page_info", "meta"];
 
 interface IndexedRow {
   id: string;
@@ -325,7 +327,6 @@ async function runAppServerProbe(
   const startedAt = Date.now();
   const deadline = startedAt + timeoutMs;
   const ids = new Set<string>();
-  const textParts: string[] = [];
   const warnings: string[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | null = null;
@@ -340,7 +341,7 @@ async function runAppServerProbe(
       }
       const pageResult = await fetchThreadListPage(appServerUrl, cursor, offset, remainingMs);
       warnings.push(...pageResult.warnings.map((warning) => `page ${page + 1}: ${warning}`));
-      collectVisibleCandidates(pageResult.threadObjects, ids, textParts, warnings, page + 1);
+      collectVisibleCandidates(pageResult.threadObjects, ids, warnings, page + 1);
       if (!pageResult.nextCursor && !pageResult.hasMore) {
         reachedPageLimit = false;
         break;
@@ -373,7 +374,7 @@ async function runAppServerProbe(
 
     return {
       ids,
-      searchableText: normalizeProbeText(textParts.join("\n")),
+      searchableText: "",
       report: {
         name: "codex-app-server",
         status: "available",
@@ -448,19 +449,20 @@ function parseAppServerThreadListPage(value: unknown): AppServerThreadListPage {
   }
   return {
     threadObjects,
-    nextCursor: firstStringAtDeep(value, [
+    nextCursor: firstStringAt(value, paginationCandidatePaths([
       "nextCursor",
       "next_cursor",
       "nextPageCursor",
       "next_page_cursor",
       "after",
       "cursor",
+      "next",
       "continuationToken",
       "continuation_token",
       "endCursor",
       "end_cursor",
-    ]),
-    hasMore: firstBooleanAtDeep(value, [
+    ])),
+    hasMore: firstBooleanAt(value, paginationCandidatePaths([
       "hasMore",
       "has_more",
       "more",
@@ -468,7 +470,7 @@ function parseAppServerThreadListPage(value: unknown): AppServerThreadListPage {
       "has_next_page",
       "nextPage",
       "next_page",
-    ]),
+    ])),
     warnings,
   };
 }
@@ -476,7 +478,6 @@ function parseAppServerThreadListPage(value: unknown): AppServerThreadListPage {
 function collectVisibleCandidates(
   threadObjects: unknown[],
   ids: Set<string>,
-  textParts: string[],
   warnings: string[],
   pageNumber: number,
 ): void {
@@ -490,7 +491,6 @@ function collectVisibleCandidates(
     for (const id of threadIds) {
       ids.add(id);
     }
-    textParts.push(JSON.stringify(thread));
   }
   if (malformedCount > 0) {
     warnings.push(
@@ -603,6 +603,32 @@ function threadIdsFromObject(value: unknown): string[] {
   return [...new Set(ids)];
 }
 
+function paginationCandidatePaths(keys: string[]): string[][] {
+  const prefixes = envelopePrefixes(3);
+  const containers = [[], ...APP_SERVER_PAGINATION_CONTAINER_KEYS.map((key) => [key])];
+  return prefixes.flatMap((prefix) =>
+    containers.flatMap((container) => keys.map((key) => [...prefix, ...container, key])),
+  );
+}
+
+function envelopePrefixes(maxDepth: number): string[][] {
+  const prefixes: string[][] = [[]];
+
+  function append(prefix: string[], depth: number): void {
+    if (depth >= maxDepth) {
+      return;
+    }
+    for (const key of APP_SERVER_ENVELOPE_KEYS) {
+      const next = [...prefix, key];
+      prefixes.push(next);
+      append(next, depth + 1);
+    }
+  }
+
+  append([], 0);
+  return prefixes;
+}
+
 function buildVisibilitySummary(threads: ThreadVisibilityRecord[]): VisibilitySummary {
   return {
     totalThreads: threads.length,
@@ -689,84 +715,6 @@ function firstBooleanAt(value: unknown, paths: string[][]): boolean {
     }
   }
   return false;
-}
-
-function firstStringAtDeep(value: unknown, keys: string[]): string | null {
-  const visited = new Set<unknown>();
-
-  function visit(current: unknown, depth: number): string | null {
-    if (depth > APP_SERVER_RESPONSE_SEARCH_DEPTH || current === null) {
-      return null;
-    }
-    if (typeof current === "object") {
-      if (visited.has(current)) {
-        return null;
-      }
-      visited.add(current);
-    }
-    if (Array.isArray(current)) {
-      return null;
-    }
-    if (!isRecord(current)) {
-      return null;
-    }
-    for (const key of keys) {
-      const child = current[key];
-      if (typeof child === "string" && child.trim()) {
-        return child.trim();
-      }
-    }
-    for (const key of [...APP_SERVER_NESTED_KEYS, "pagination", "pageInfo", "page_info", "meta"]) {
-      if (key in current) {
-        const nested = visit(current[key], depth + 1);
-        if (nested) {
-          return nested;
-        }
-      }
-    }
-    return null;
-  }
-
-  return visit(value, 0);
-}
-
-function firstBooleanAtDeep(value: unknown, keys: string[]): boolean {
-  const visited = new Set<unknown>();
-
-  function visit(current: unknown, depth: number): boolean | null {
-    if (depth > APP_SERVER_RESPONSE_SEARCH_DEPTH || current === null) {
-      return null;
-    }
-    if (typeof current === "object") {
-      if (visited.has(current)) {
-        return null;
-      }
-      visited.add(current);
-    }
-    if (Array.isArray(current)) {
-      return null;
-    }
-    if (!isRecord(current)) {
-      return null;
-    }
-    for (const key of keys) {
-      const child = current[key];
-      if (typeof child === "boolean") {
-        return child;
-      }
-    }
-    for (const key of [...APP_SERVER_NESTED_KEYS, "pagination", "pageInfo", "page_info", "meta"]) {
-      if (key in current) {
-        const nested = visit(current[key], depth + 1);
-        if (nested !== null) {
-          return nested;
-        }
-      }
-    }
-    return null;
-  }
-
-  return visit(value, 0) ?? false;
 }
 
 function isPlausibleThreadId(value: string): boolean {
