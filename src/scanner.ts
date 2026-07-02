@@ -38,6 +38,7 @@ interface JsonlThreadEvidence {
   existsOnDisk: boolean;
   messageCount: number;
   contentPreview: string;
+  transcriptText: string | null;
 }
 
 interface MutableThread {
@@ -52,7 +53,12 @@ interface MutableThread {
   existsOnDisk: boolean;
   messageCount: number;
   contentPreview: string;
+  transcriptText: string | null;
   sourcePaths: Set<string>;
+}
+
+export interface ScanOptions {
+  includeTranscriptText?: boolean;
 }
 
 const SQLITE_FIELDS = [
@@ -65,7 +71,10 @@ const SQLITE_FIELDS = [
   "rollout_path",
 ] as const;
 
-export async function scanCodexStorage(codexHomeInput: string): Promise<ScanResult> {
+export async function scanCodexStorage(
+  codexHomeInput: string,
+  options: ScanOptions = {},
+): Promise<ScanResult> {
   const codexHome = path.resolve(expandHome(codexHomeInput));
   const diagnostics: Diagnostic[] = [];
   const byKey = new Map<string, MutableThread>();
@@ -90,7 +99,7 @@ export async function scanCodexStorage(codexHomeInput: string): Promise<ScanResu
   ];
 
   for (const file of sessionFiles) {
-    const evidence = await readJsonlThread(file, codexHome, diagnostics);
+    const evidence = await readJsonlThread(file, codexHome, diagnostics, options);
     if (evidence) {
       mergeJsonlEvidence(byKey, evidence);
     }
@@ -197,6 +206,7 @@ async function readJsonlThread(
   file: string,
   codexHome: string,
   diagnostics: Diagnostic[],
+  options: ScanOptions,
 ): Promise<JsonlThreadEvidence | null> {
   let lineCount = 0;
   let messageCount = 0;
@@ -206,6 +216,7 @@ async function readJsonlThread(
   let createdAt: number | null = null;
   let updatedAt: number | null = null;
   const textParts: string[] = [];
+  const transcriptParts: string[] = [];
   let previewLength = 0;
 
   try {
@@ -257,6 +268,9 @@ async function readJsonlThread(
       const messageText = extractTranscriptMessage(value);
       if (messageText !== null) {
         messageCount += 1;
+        if (options.includeTranscriptText && messageText) {
+          transcriptParts.push(messageText);
+        }
         if (previewLength < 4000 && messageText) {
           textParts.push(messageText);
           previewLength += messageText.length + 1;
@@ -292,6 +306,9 @@ async function readJsonlThread(
     existsOnDisk: true,
     messageCount,
     contentPreview: normalizeWhitespace(textParts.join(" ")).slice(0, 4000),
+    transcriptText: options.includeTranscriptText
+      ? normalizeWhitespace(transcriptParts.join(" "))
+      : null,
   };
 }
 
@@ -321,6 +338,7 @@ function mergeSqliteRow(
       existsOnDisk: false,
       messageCount: 0,
       contentPreview: "",
+      transcriptText: null,
       sourcePaths: new Set<string>(),
     };
 
@@ -356,6 +374,7 @@ function mergeJsonlEvidence(byKey: Map<string, MutableThread>, evidence: JsonlTh
       existsOnDisk: false,
       messageCount: 0,
       contentPreview: "",
+      transcriptText: null,
       sourcePaths: new Set<string>(),
     };
 
@@ -367,6 +386,7 @@ function mergeJsonlEvidence(byKey: Map<string, MutableThread>, evidence: JsonlTh
   thread.existsOnDisk = true;
   thread.messageCount = Math.max(thread.messageCount, evidence.messageCount);
   thread.contentPreview = thread.contentPreview || evidence.contentPreview;
+  thread.transcriptText = thread.transcriptText || evidence.transcriptText;
   thread.sourcePaths.add(evidence.rolloutPath);
   thread.storageKind =
     thread.storageKind === "jsonl-only" || thread.storageKind === evidence.storageKind
@@ -381,6 +401,7 @@ function finalizeThread(thread: MutableThread): ThreadRecord {
   const restoreStatus = determineRestoreStatus(thread);
   return {
     ...thread,
+    transcriptText: thread.transcriptText ?? undefined,
     restoreStatus,
     sourcePaths: Array.from(thread.sourcePaths).sort(),
   };

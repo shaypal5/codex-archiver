@@ -118,6 +118,29 @@ select {
   margin-bottom: 16px;
 }
 
+.results-bar {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+#result-count {
+  color: #565951;
+  font-size: 13px;
+}
+
+.pager {
+  display: flex;
+  gap: 8px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .diagnostic {
   border-radius: 6px;
   font-size: 13px;
@@ -232,7 +255,13 @@ td {
   }
 
   .badges,
-  .filters {
+  .filters,
+  .results-bar {
     grid-template-columns: 1fr;
+  }
+
+  .results-bar {
+    align-items: stretch;
+    display: grid;
   }
 }

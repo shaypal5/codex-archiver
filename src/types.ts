@@ -25,6 +25,7 @@ export interface ThreadRecord {
   existsOnDisk: boolean;
   messageCount: number;
   contentPreview: string;
+  transcriptText?: string;
   restoreStatus: RestoreStatus;
   sourcePaths: string[];
 }
@@ -49,6 +50,9 @@ export interface ScanResult {
   stats: ScanStats;
   diagnostics: Diagnostic[];
   threads: ThreadRecord[];
+  totalMatches?: number;
+  limit?: number;
+  offset?: number;
 }
 
 export interface ThreadQuery {
@@ -56,4 +60,15 @@ export interface ThreadQuery {
   content?: string;
   cwd?: string;
   status?: RestoreStatus | "all";
+  limit?: number;
+  offset?: number;
+}
+
+export interface SearchIndexMeta {
+  codexHome: string;
+  indexPath: string;
+  rebuiltAt: string | null;
+  sourceFingerprint: string | null;
+  stats: ScanStats;
+  diagnostics: Diagnostic[];
 }
