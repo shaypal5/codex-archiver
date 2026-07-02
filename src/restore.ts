@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { rebuildSearchIndex } from "./indexer.js";
@@ -194,6 +194,11 @@ export async function applyRestorePlan(options: RestoreApplyInternalOptions): Pr
           evidence: [message],
         };
     const finalStatus = status === "succeeded" && verification.status !== "succeeded" ? verification.status : status;
+    const resultMessage = finalStatus === "succeeded"
+      ? "Restore apply completed and verification passed."
+      : status === "succeeded"
+        ? `Restore apply mutations completed, but verification finished with status ${verification.status}.`
+        : message;
     const report: RestoreApplyReport = {
       schemaVersion: 1,
       reportType: "restore-apply-report",
@@ -212,7 +217,7 @@ export async function applyRestorePlan(options: RestoreApplyInternalOptions): Pr
       verification,
       result: {
         status: finalStatus,
-        message: finalStatus === "succeeded" ? "Restore apply completed and verification passed." : message,
+        message: resultMessage,
         reportPath,
         backupRoot,
       },
@@ -1052,11 +1057,10 @@ async function createBackups(
   for (const target of plan.backupPreview.targets) {
     if (target.exists) {
       await mkdir(path.dirname(target.backupPath), { recursive: true, mode: 0o700 });
-      await copyFile(target.sourcePath, target.backupPath);
+      await cp(target.sourcePath, target.backupPath, { preserveTimestamps: true });
     }
     targets.push({
       ...target,
-      backupPath: target.exists ? target.backupPath : "",
     });
   }
 
@@ -1086,7 +1090,7 @@ async function copyRolloutForApply(
     message: `Copy archived rollout source ${sourcePath} to active session target.`,
   });
   await mkdir(path.dirname(activeTargetPath), { recursive: true, mode: 0o700 });
-  await copyFile(sourcePath, tmpPath);
+  await cp(sourcePath, tmpPath, { preserveTimestamps: true });
   await rename(tmpPath, activeTargetPath);
   cleanupActions.push(async () => {
     await rm(activeTargetPath, { force: true });

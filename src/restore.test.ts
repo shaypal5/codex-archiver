@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -351,6 +351,11 @@ test("restore apply backs up, mutates archived SQLite thread, reports, and verif
   assert(await exists(report.result.reportPath));
 
   const activeTarget = path.join(fixture.codexHome, "sessions", "archived.jsonl");
+  const archivedSourceBackup = report.backupManifest.targets.find((target) => target.sourcePath.endsWith("archived.jsonl"));
+  assert(archivedSourceBackup);
+  assert(await exists(archivedSourceBackup.backupPath));
+  await assertMtimeClose(archivedSourceBackup.sourcePath, archivedSourceBackup.backupPath);
+  await assertMtimeClose(archivedSourceBackup.sourcePath, activeTarget);
   assert.equal((await readFile(activeTarget, "utf8")).includes("archived-thread"), true);
   const rows = readSqliteRows(fixture.codexHome, "archived-thread");
   assert.equal(rows[0]?.archived, 0);
@@ -725,6 +730,12 @@ async function exists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function assertMtimeClose(sourcePath: string, copiedPath: string): Promise<void> {
+  const source = await stat(sourcePath);
+  const copied = await stat(copiedPath);
+  assert(Math.abs(source.mtimeMs - copied.mtimeMs) < 1000);
 }
 
 async function listFiles(root: string): Promise<string[]> {
