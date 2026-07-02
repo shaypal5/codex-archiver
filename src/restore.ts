@@ -422,7 +422,7 @@ export async function undoRestoreApply(options: RestoreUndoInternalOptions): Pro
         "Undo rebuilds the derived search index after restore, but it does not inspect Codex Desktop UI state directly.",
       ],
     };
-    if (finalStatus !== "preview" && safetyBackup !== null) {
+    if (finalStatus !== "preview" && (safetyBackup !== null || confirmationMatchesUndo(options, confirmationToken, confirmationPhrase))) {
       await mkdir(path.dirname(undoReportPath), { recursive: true, mode: 0o700 });
       await writeFile(undoReportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
     }
@@ -640,7 +640,7 @@ function buildUndoValidation(input: {
   readErrors: string[];
 }): RestorePlanPreflight {
   const checks: RestorePlanPreflightCheck[] = [
-    undoReportSchemaCheck(input.sourceReport, input.readErrors),
+    undoReportSchemaCheck(input.backupRoot, input.sourceReport, input.readErrors),
     undoManifestSchemaCheck(input.backupRoot, input.manifestPath, input.backupManifest, input.readErrors),
     undoManifestPathCheck(input.backupRoot, input.backupManifest, input.targets),
     undoTargetPathCheck(input.codexHome, input.indexPath, input.targets),
@@ -661,6 +661,7 @@ function buildUndoValidation(input: {
 }
 
 function undoReportSchemaCheck(
+  backupRoot: string,
   sourceReport: RestoreApplyReport | null,
   readErrors: string[],
 ): RestorePlanPreflightCheck {
@@ -678,6 +679,20 @@ function undoReportSchemaCheck(
       "Apply report schema",
       [`Unsupported report schemaVersion/reportType: ${String(sourceReport.schemaVersion)} ${String(sourceReport.reportType)}.`],
       "Use a schemaVersion 1 restore-apply-report produced by restore apply.",
+    );
+  }
+  const rootErrors = [
+    sourceReport.result.backupRoot,
+    sourceReport.backupManifest.backupRoot,
+  ]
+    .filter((candidate) => path.resolve(candidate) !== path.resolve(backupRoot))
+    .map((candidate) => `Source apply report references backup root ${candidate}, not requested root ${backupRoot}.`);
+  if (rootErrors.length > 0) {
+    return failedUndoCheck(
+      "undo-report-schema",
+      "Apply report schema",
+      rootErrors,
+      "Use the report with its original backup root, or pass --backup-root matching the apply report artifact.",
     );
   }
   return passedUndoCheck(
@@ -749,6 +764,8 @@ function undoManifestPathCheck(
     }
     if (!pathInside(backupRoot, target.backupPath)) {
       errors.push(`${target.backupPath} escapes backup root ${backupRoot}.`);
+    } else if (target.action === "restore-file" && !backupPathDoesNotEscape(backupRoot, target.backupPath)) {
+      errors.push(`${target.backupPath} resolves through a symlink or realpath outside backup root ${backupRoot}.`);
     } else {
       evidence.push(`${target.backupPath}: inside backup root.`);
     }
@@ -1419,6 +1436,24 @@ function targetPathDoesNotEscape(codexHome: string, indexPath: string, candidate
   }
 }
 
+function backupPathDoesNotEscape(backupRoot: string, candidate: string): boolean {
+  const absolute = path.resolve(candidate);
+  if (!pathInside(backupRoot, absolute)) {
+    return false;
+  }
+  try {
+    if (!existsSync(absolute)) {
+      return true;
+    }
+    if (lstatSync(absolute).isSymbolicLink()) {
+      return false;
+    }
+    return pathInside(realpathSync(backupRoot), realpathSync(absolute));
+  } catch {
+    return false;
+  }
+}
+
 function nearestExistingParent(filePath: string): string {
   let current = path.dirname(filePath);
   while (!existsSync(current)) {
@@ -1889,9 +1924,14 @@ async function createUndoSafetyBackup(input: {
 
 async function restoreFromBackupTarget(target: RestoreUndoTarget): Promise<void> {
   const tmpPath = tempSiblingPath(target.sourcePath);
-  await mkdir(path.dirname(target.sourcePath), { recursive: true, mode: 0o700 });
-  await cp(target.backupPath, tmpPath, { preserveTimestamps: true });
-  await rename(tmpPath, target.sourcePath);
+  try {
+    await mkdir(path.dirname(target.sourcePath), { recursive: true, mode: 0o700 });
+    await cp(target.backupPath, tmpPath, { preserveTimestamps: true });
+    await rename(tmpPath, target.sourcePath);
+  } catch (error) {
+    await rm(tmpPath, { force: true });
+    throw error;
+  }
 }
 
 async function verifyUndo(input: {

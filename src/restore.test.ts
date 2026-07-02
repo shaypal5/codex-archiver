@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -630,7 +630,7 @@ test("restore undo creates safety backup, restores backed files, removes apply-c
   assert.equal(readSqliteRows(fixture.codexHome, "archived-thread")[0]?.archived, 1);
 });
 
-test("restore undo rejects manifest path traversal and bad backup hashes without mutation", async (t) => {
+test("restore undo rejects report/manifest traversal, backup symlinks, and bad hashes without mutation", async (t) => {
   if (!hasSqliteCli()) {
     t.skip("sqlite3 CLI is required for restore undo tests");
     return;
@@ -654,6 +654,43 @@ test("restore undo rejects manifest path traversal and bad backup hashes without
   assert.equal(traversalReport.result.status, "blocked");
   assert.match(traversalReport.result.message, /validation blocked/);
   assert.deepEqual(await snapshotFiles(traversal.fixture.codexHome), traversalSnapshot);
+
+  const rootMismatch = await createAppliedFixture(t);
+  const rootMismatchSnapshot = await snapshotFiles(rootMismatch.fixture.codexHome);
+  const rootMismatchReport = JSON.parse(
+    await readFile(rootMismatch.applyReport.result.reportPath, "utf8"),
+  ) as { result: { backupRoot: string } };
+  rootMismatchReport.result.backupRoot = path.join(rootMismatch.fixture.root, "different-backup-root");
+  await writeFile(rootMismatch.applyReport.result.reportPath, `${JSON.stringify(rootMismatchReport, null, 2)}\n`);
+  const rootMismatchUndo = await undoRestoreApply({
+    codexHome: rootMismatch.fixture.codexHome,
+    indexPath: rootMismatch.fixture.indexPath,
+    reportPath: rootMismatch.applyReport.result.reportPath,
+    confirmationToken: "undo-anything",
+    processDetector: noCodexProcesses,
+  });
+
+  assert.equal(rootMismatchUndo.result.status, "blocked");
+  assert(rootMismatchUndo.validation.checks.some((check) => check.id === "undo-report-schema" && check.status === "failed"));
+  assert.deepEqual(await snapshotFiles(rootMismatch.fixture.codexHome), rootMismatchSnapshot);
+
+  const backupSymlink = await createAppliedFixture(t);
+  const backupSymlinkSnapshot = await snapshotFiles(backupSymlink.fixture.codexHome);
+  const symlinkStateBackup = backupSymlink.applyReport.backupManifest.targets.find((target) => target.sourcePath.endsWith("state_5.sqlite"));
+  assert(symlinkStateBackup);
+  await rm(symlinkStateBackup.backupPath);
+  await symlink(path.join(backupSymlink.fixture.codexHome, "state_5.sqlite"), symlinkStateBackup.backupPath);
+  const backupSymlinkReport = await undoRestoreApply({
+    codexHome: backupSymlink.fixture.codexHome,
+    indexPath: backupSymlink.fixture.indexPath,
+    reportPath: backupSymlink.applyReport.result.reportPath,
+    confirmationToken: "undo-anything",
+    processDetector: noCodexProcesses,
+  });
+
+  assert.equal(backupSymlinkReport.result.status, "blocked");
+  assert(backupSymlinkReport.validation.checks.some((check) => check.id === "undo-manifest-paths" && check.status === "failed"));
+  assert.deepEqual(await snapshotFiles(backupSymlink.fixture.codexHome), backupSymlinkSnapshot);
 
   const badHash = await createAppliedFixture(t);
   const badHashSnapshot = await snapshotFiles(badHash.fixture.codexHome);
