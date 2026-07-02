@@ -277,6 +277,9 @@ export interface RestorePlanReportPreview {
   readOnlyPreview: true;
   wouldWriteReport: false;
   plannedReportPath: string;
+  planHash: string;
+  confirmationToken: string;
+  confirmationPhrase: string;
   requiredFields: string[];
   itemFields: string[];
   undoFields: string[];
@@ -296,4 +299,85 @@ export interface RestorePlan {
   backupPreview: RestorePlanBackupPreview;
   reportPreview: RestorePlanReportPreview;
   items: RestorePlanItem[];
+}
+
+export type RestoreApplyResultStatus =
+  | "succeeded"
+  | "blocked"
+  | "failed"
+  | "partial";
+
+export interface RestoreApplyOptions {
+  codexHome?: string;
+  indexPath?: string;
+  selectedThreadIds: string[];
+  confirmationToken?: string;
+  confirmationPhrase?: string;
+  processCheckMode?: RestoreProcessCheckMode;
+}
+
+export interface RestoreApplyBackupManifest {
+  backupRoot: string;
+  manifestPath: string;
+  createdAt: string;
+  targets: RestorePlanBackupTarget[];
+}
+
+export interface RestoreApplyMutation {
+  threadId: string;
+  kind:
+    | "copy-rollout-to-active-session"
+    | "update-session-index"
+    | "sqlite-unarchive-thread"
+    | "rebuild-search-index";
+  targetPath: string;
+  status: "attempted" | "applied" | "skipped" | "rolled-back" | "failed";
+  message: string;
+}
+
+export interface RestoreApplyItemReport {
+  threadId: string;
+  classification: RestorePlanClassification;
+  actionability: RestorePlanActionability;
+  selectedForApply: boolean;
+  sourcePaths: string[];
+  plannedMutations: string[];
+  appliedMutations: RestoreApplyMutation[];
+  warnings: string[];
+  errors: string[];
+}
+
+export interface RestoreApplyVerification {
+  status: RestoreApplyResultStatus;
+  checkedAt: string;
+  restoredThreadIds: string[];
+  failedThreadIds: string[];
+  diagnostics: Diagnostic[];
+  evidence: string[];
+}
+
+export interface RestoreApplyReport {
+  schemaVersion: 1;
+  reportType: "restore-apply-report";
+  operationId: string;
+  startedAt: string;
+  completedAt: string;
+  codexHome: string;
+  indexPath: string;
+  selectedThreadIds: string[];
+  planHash: string;
+  confirmationToken: string;
+  preflight: RestorePlanPreflight;
+  backupManifest: RestoreApplyBackupManifest;
+  items: RestoreApplyItemReport[];
+  mutations: RestoreApplyMutation[];
+  verification: RestoreApplyVerification;
+  result: {
+    status: RestoreApplyResultStatus;
+    message: string;
+    reportPath: string;
+    backupRoot: string;
+  };
+  nextUserSteps: string[];
+  limits: string[];
 }

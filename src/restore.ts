@@ -1,12 +1,21 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { rebuildSearchIndex } from "./indexer.js";
 import { defaultCodexHome, defaultIndexPath, expandHome } from "./paths.js";
 import { scanCodexStorage } from "./scanner.js";
+import { runSql, sqlValue } from "./sqlite.js";
 import type {
   Diagnostic,
+  RestoreApplyBackupManifest,
+  RestoreApplyItemReport,
+  RestoreApplyMutation,
+  RestoreApplyOptions,
+  RestoreApplyReport,
+  RestoreApplyResultStatus,
   RestorePlan,
   RestorePlanActionability,
   RestorePlanBackupPreview,
@@ -32,6 +41,12 @@ export interface RestorePlanOptions {
   processCheckMode?: RestoreProcessCheckMode;
   processDetector?: CodexProcessDetector;
   now?: Date;
+}
+
+export interface RestoreApplyInternalOptions extends RestoreApplyOptions {
+  processDetector?: CodexProcessDetector;
+  now?: Date;
+  sqlRunner?: (dbPath: string, sql: string) => Promise<void>;
 }
 
 export interface CodexProcessDetection {
@@ -91,12 +106,13 @@ export async function createRestorePlanFromThreads(input: {
   );
   const backupRoot = plannedBackupRoot(indexPath, generatedAt, selectedThreadIds);
   const backupPreview = buildBackupPreview(codexHome, indexPath, backupRoot, items);
-  const reportPreview = buildReportPreview(backupRoot);
   const preflight = await buildPreflight({
     items,
     processCheckMode: input.processCheckMode ?? "warn",
     processDetector: input.processDetector ?? detectCodexProcesses,
   });
+  const planHash = stablePlanHash({ codexHome, indexPath, selectedThreadIds, items, backupPreview, preflight });
+  const reportPreview = buildReportPreview(backupRoot, planHash);
 
   return {
     codexHome,
@@ -112,6 +128,172 @@ export async function createRestorePlanFromThreads(input: {
     reportPreview,
     items,
   };
+}
+
+export async function applyRestorePlan(options: RestoreApplyInternalOptions): Promise<RestoreApplyReport> {
+  const codexHome = path.resolve(expandHome(options.codexHome ?? defaultCodexHome()));
+  const indexPath = path.resolve(expandHome(options.indexPath ?? defaultIndexPath()));
+  const selectedThreadIds = normalizeSelectedThreadIds(options.selectedThreadIds);
+  const startedAt = (options.now ?? new Date()).toISOString();
+  const operationId = `restore-apply-${startedAt.replaceAll(/[:.]/g, "-")}`;
+  const plan = await createRestorePlan({
+    codexHome,
+    indexPath,
+    selectedThreadIds,
+    processCheckMode: options.processCheckMode ?? "warn",
+    processDetector: options.processDetector,
+    now: options.now,
+  });
+  const planHash = plan.reportPreview.planHash;
+  const confirmationToken = plan.reportPreview.confirmationToken;
+  const backupRoot = plan.backupPreview.plannedBackupRoot;
+  const reportPath = path.join(backupRoot, "restore-report.json");
+  const manifestPath = path.join(backupRoot, "backup-manifest.json");
+  const mutations: RestoreApplyMutation[] = [];
+  const cleanupActions: Array<() => Promise<void>> = [];
+  let backupManifest: RestoreApplyBackupManifest = {
+    backupRoot,
+    manifestPath,
+    createdAt: startedAt,
+    targets: [],
+  };
+
+  const applyableItems = plan.items.filter((item) => item.classification === "archived-sqlite-thread");
+  const itemReports = plan.items.map((item): RestoreApplyItemReport => ({
+    threadId: item.threadId,
+    classification: item.classification,
+    actionability: item.actionability,
+    selectedForApply: applyableItems.includes(item),
+    sourcePaths: item.evidence.sourcePaths,
+    plannedMutations: plannedMutationKinds(item),
+    appliedMutations: [],
+    warnings: item.classification === "archived-sqlite-thread"
+      ? []
+      : [`M4 apply skips ${item.classification}; it only mutates archived SQLite threads with archived JSONL evidence.`],
+    errors: [],
+  }));
+
+  function itemReport(threadId: string): RestoreApplyItemReport | undefined {
+    return itemReports.find((item) => item.threadId === threadId);
+  }
+
+  function recordMutation(mutation: RestoreApplyMutation): void {
+    mutations.push(mutation);
+    itemReport(mutation.threadId)?.appliedMutations.push(mutation);
+  }
+
+  async function writeReport(status: RestoreApplyResultStatus, message: string): Promise<RestoreApplyReport> {
+    const verification = status === "succeeded" || status === "partial"
+      ? await verifyApply({ codexHome, applyableItems, startedAt })
+      : {
+          status,
+          checkedAt: new Date().toISOString(),
+          restoredThreadIds: [],
+          failedThreadIds: applyableItems.map((item) => item.threadId),
+          diagnostics: [],
+          evidence: [message],
+        };
+    const finalStatus = status === "succeeded" && verification.status !== "succeeded" ? verification.status : status;
+    const resultMessage = finalStatus === "succeeded"
+      ? "Restore apply completed and verification passed."
+      : status === "succeeded"
+        ? `Restore apply mutations completed, but verification finished with status ${verification.status}.`
+        : message;
+    const report: RestoreApplyReport = {
+      schemaVersion: 1,
+      reportType: "restore-apply-report",
+      operationId,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      codexHome,
+      indexPath,
+      selectedThreadIds,
+      planHash,
+      confirmationToken,
+      preflight: plan.preflight,
+      backupManifest,
+      items: itemReports,
+      mutations,
+      verification,
+      result: {
+        status: finalStatus,
+        message: resultMessage,
+        reportPath,
+        backupRoot,
+      },
+      nextUserSteps: nextUserSteps(finalStatus, reportPath, backupRoot),
+      limits: [
+        "M4 apply only supports archived SQLite threads with existing archived JSONL evidence.",
+        "JSONL-only archived threads and UI-hidden active threads remain diagnostic-only until later milestones.",
+        "Undo/restore-from-backup is documented in the report but implemented in a later milestone.",
+      ],
+    };
+    await mkdir(backupRoot, { recursive: true, mode: 0o700 });
+    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    return report;
+  }
+
+  if (selectedThreadIds.length === 0) {
+    return writeReport("blocked", "restore apply requires at least one selected thread id.");
+  }
+
+  if (!confirmationMatches(options, confirmationToken, plan.reportPreview.confirmationPhrase)) {
+    return writeReport(
+      "blocked",
+      `Confirmation did not match. Re-run restore plan and pass --confirm-token ${confirmationToken}.`,
+    );
+  }
+
+  const blockingChecks = plan.preflight.checks.filter((check) => check.status !== "passed" || check.blocking);
+  if (blockingChecks.length > 0) {
+    return writeReport("blocked", "Preflight did not pass; no Codex state was mutated.");
+  }
+
+  if (applyableItems.length === 0) {
+    return writeReport("blocked", "No selected threads are supported by M4 restore apply.");
+  }
+
+  try {
+    backupManifest = await createBackups(plan, backupRoot, manifestPath);
+
+    for (const item of applyableItems) {
+      const sourcePath = archivedSourcePath(item);
+      const activeTargetPath = activeTargetPathFor(item);
+      if (!sourcePath || !activeTargetPath) {
+        itemReport(item.threadId)?.errors.push("Missing archived source or active target path.");
+        throw new Error(`Cannot derive active target path for ${item.threadId}.`);
+      }
+
+      await copyRolloutForApply(sourcePath, activeTargetPath, item.threadId, recordMutation, cleanupActions);
+    }
+
+    await updateSessionIndexForApply(codexHome, applyableItems, recordMutation, cleanupActions);
+    await updateSqliteForApply(
+      codexHome,
+      applyableItems,
+      options.sqlRunner ?? runSql,
+      recordMutation,
+    );
+    await rebuildSearchIndex({ codexHome, indexPath });
+    for (const item of applyableItems) {
+      recordMutation({
+        threadId: item.threadId,
+        kind: "rebuild-search-index",
+        targetPath: indexPath,
+        status: "applied",
+        message: "Rebuilt the derived codex-archiver search index after restore apply.",
+      });
+    }
+  } catch (error) {
+    await rollbackCleanup(cleanupActions, mutations);
+    const message = `Restore apply failed before successful verification: ${errorMessage(error)}`;
+    for (const item of applyableItems) {
+      itemReport(item.threadId)?.errors.push(message);
+    }
+    return writeReport("failed", message);
+  }
+
+  return writeReport("succeeded", "Restore apply completed.");
 }
 
 async function buildPreflight(input: {
@@ -550,52 +732,6 @@ function backupTarget(
   };
 }
 
-function buildReportPreview(backupRoot: string): RestorePlanReportPreview {
-  return {
-    schemaVersion: 1,
-    reportType: "restore-apply-report",
-    readOnlyPreview: true,
-    wouldWriteReport: false,
-    plannedReportPath: path.join(backupRoot, "restore-report.json"),
-    requiredFields: [
-      "schemaVersion",
-      "operationId",
-      "startedAt",
-      "completedAt",
-      "codexHome",
-      "selectedThreadIds",
-      "preflight",
-      "backupManifest",
-      "items",
-      "transactionPlan",
-      "undoPlan",
-      "result",
-    ],
-    itemFields: [
-      "threadId",
-      "classification",
-      "actionability",
-      "sourcePaths",
-      "plannedMutations",
-      "appliedMutations",
-      "warnings",
-      "errors",
-    ],
-    undoFields: [
-      "backupRoot",
-      "stateDbBackup",
-      "sessionIndexBackup",
-      "rolloutFileBackups",
-      "searchIndexBackup",
-      "restoreSteps",
-    ],
-    notes: [
-      "Planning previews the report schema but does not write a report file.",
-      "Future apply must write this report next to the backup manifest before reporting success.",
-    ],
-  };
-}
-
 function plannedPaths(
   stateDbPath: string,
   sessionIndexPath: string,
@@ -791,6 +927,449 @@ function backupRelativePath(codexHome: string, indexPath: string, filePath: stri
     return path.join("cache-relative", relativeToIndex);
   }
   return path.join("absolute", absolute.replaceAll(path.sep, "__"));
+}
+
+function buildReportPreview(backupRoot: string, planHash: string): RestorePlanReportPreview {
+  const confirmationToken = confirmationTokenForPlanHash(planHash);
+  return {
+    schemaVersion: 1,
+    reportType: "restore-apply-report",
+    readOnlyPreview: true,
+    wouldWriteReport: false,
+    plannedReportPath: path.join(backupRoot, "restore-report.json"),
+    planHash,
+    confirmationToken,
+    confirmationPhrase: `apply restore ${confirmationToken}`,
+    requiredFields: [
+      "schemaVersion",
+      "operationId",
+      "startedAt",
+      "completedAt",
+      "codexHome",
+      "selectedThreadIds",
+      "preflight",
+      "backupManifest",
+      "items",
+      "mutations",
+      "verification",
+      "result",
+    ],
+    itemFields: [
+      "threadId",
+      "classification",
+      "actionability",
+      "sourcePaths",
+      "plannedMutations",
+      "appliedMutations",
+      "warnings",
+      "errors",
+    ],
+    undoFields: [
+      "backupRoot",
+      "stateDbBackup",
+      "sessionIndexBackup",
+      "rolloutFileBackups",
+      "searchIndexBackup",
+      "restoreSteps",
+    ],
+    notes: [
+      "Planning previews the report schema but does not write a report file.",
+      "Apply must pass the confirmation token or phrase from this preview before mutating Codex state.",
+      "Apply writes this report next to the backup manifest before reporting success.",
+    ],
+  };
+}
+
+function stablePlanHash(input: {
+  codexHome: string;
+  indexPath: string;
+  selectedThreadIds: string[];
+  items: RestorePlanItem[];
+  backupPreview: RestorePlanBackupPreview;
+  preflight: RestorePlanPreflight;
+}): string {
+  const stable = {
+    codexHome: input.codexHome,
+    indexPath: input.indexPath,
+    selectedThreadIds: input.selectedThreadIds,
+    items: input.items.map((item) => ({
+      threadId: item.threadId,
+      classification: item.classification,
+      actionability: item.actionability,
+      evidence: {
+        restoreStatus: item.evidence.restoreStatus,
+        storageKind: item.evidence.storageKind,
+        archived: item.evidence.archived,
+        rolloutPath: item.evidence.rolloutPath,
+        sourcePaths: item.evidence.sourcePaths,
+        existsOnDisk: item.evidence.existsOnDisk,
+        hasActiveRolloutPath: item.evidence.hasActiveRolloutPath,
+        hasArchivedRolloutPath: item.evidence.hasArchivedRolloutPath,
+        sqlitePresent: item.evidence.sqlitePresent,
+      },
+      plannedPaths: item.plannedPaths.map((planned) => ({
+        kind: planned.kind,
+        path: planned.path,
+        exists: planned.exists,
+        requiredBeforeApply: planned.requiredBeforeApply,
+      })),
+      validations: item.validations.map((validation) => ({
+        id: validation.id,
+        status: validation.status,
+      })),
+    })),
+    backupTargets: input.backupPreview.targets.map((target) => ({
+      sourcePath: target.sourcePath,
+      kind: target.kind,
+      exists: target.exists,
+      sizeBytes: target.sizeBytes,
+      sha256: target.sha256,
+      hashStatus: target.hashStatus,
+    })),
+    preflight: input.preflight.checks.map((check) => ({
+      id: check.id,
+      status: check.status,
+      blocking: check.blocking,
+    })),
+  };
+  return createHash("sha256").update(JSON.stringify(stable)).digest("hex");
+}
+
+function confirmationTokenForPlanHash(planHash: string): string {
+  return `restore-${planHash.slice(0, 16)}`;
+}
+
+function confirmationMatches(
+  options: RestoreApplyInternalOptions,
+  expectedToken: string,
+  expectedPhrase: string,
+): boolean {
+  return options.confirmationToken === expectedToken || options.confirmationPhrase === expectedPhrase;
+}
+
+async function createBackups(
+  plan: RestorePlan,
+  backupRoot: string,
+  manifestPath: string,
+): Promise<RestoreApplyBackupManifest> {
+  await mkdir(backupRoot, { recursive: true, mode: 0o700 });
+  const targets: RestorePlanBackupTarget[] = [];
+  for (const target of plan.backupPreview.targets) {
+    if (target.exists) {
+      await mkdir(path.dirname(target.backupPath), { recursive: true, mode: 0o700 });
+      await cp(target.sourcePath, target.backupPath, { preserveTimestamps: true });
+    }
+    targets.push({
+      ...target,
+    });
+  }
+
+  const manifest: RestoreApplyBackupManifest = {
+    backupRoot,
+    manifestPath,
+    createdAt: new Date().toISOString(),
+    targets,
+  };
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  return manifest;
+}
+
+async function copyRolloutForApply(
+  sourcePath: string,
+  activeTargetPath: string,
+  threadId: string,
+  recordMutation: (mutation: RestoreApplyMutation) => void,
+  cleanupActions: Array<() => Promise<void>>,
+): Promise<void> {
+  const tmpPath = tempSiblingPath(activeTargetPath);
+  recordMutation({
+    threadId,
+    kind: "copy-rollout-to-active-session",
+    targetPath: activeTargetPath,
+    status: "attempted",
+    message: `Copy archived rollout source ${sourcePath} to active session target.`,
+  });
+  await mkdir(path.dirname(activeTargetPath), { recursive: true, mode: 0o700 });
+  await cp(sourcePath, tmpPath, { preserveTimestamps: true });
+  await rename(tmpPath, activeTargetPath);
+  cleanupActions.push(async () => {
+    await rm(activeTargetPath, { force: true });
+  });
+  recordMutation({
+    threadId,
+    kind: "copy-rollout-to-active-session",
+    targetPath: activeTargetPath,
+    status: "applied",
+    message: "Copied archived rollout JSONL to the active sessions tree with atomic rename.",
+  });
+}
+
+async function updateSessionIndexForApply(
+  codexHome: string,
+  items: RestorePlanItem[],
+  recordMutation: (mutation: RestoreApplyMutation) => void,
+  cleanupActions: Array<() => Promise<void>>,
+): Promise<void> {
+  const sessionIndexPath = path.join(codexHome, SESSION_INDEX);
+  const original = existsSync(sessionIndexPath) ? await readFile(sessionIndexPath, "utf8") : null;
+  const lines = (original ?? "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0);
+  const updatedRows: string[] = [];
+  const touched = new Set<string>();
+
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      updatedRows.push(line);
+      continue;
+    }
+
+    const matching = items.find((item) => sessionIndexRowMatches(codexHome, parsed, item));
+    if (!matching) {
+      updatedRows.push(line);
+      continue;
+    }
+    updatedRows.push(JSON.stringify(sessionIndexRowForItem(matching, parsed)));
+    touched.add(matching.threadId);
+  }
+
+  for (const item of items) {
+    if (!touched.has(item.threadId)) {
+      updatedRows.push(JSON.stringify(sessionIndexRowForItem(item)));
+    }
+  }
+
+  const tmpPath = tempSiblingPath(sessionIndexPath);
+  await mkdir(path.dirname(sessionIndexPath), { recursive: true, mode: 0o700 });
+  await writeFile(tmpPath, `${updatedRows.join("\n")}\n`, { mode: 0o600 });
+  await rename(tmpPath, sessionIndexPath);
+  cleanupActions.push(async () => {
+    if (original === null) {
+      await rm(sessionIndexPath, { force: true });
+      return;
+    }
+    const restoreTmp = tempSiblingPath(sessionIndexPath);
+    await writeFile(restoreTmp, original, { mode: 0o600 });
+    await rename(restoreTmp, sessionIndexPath);
+  });
+
+  for (const item of items) {
+    recordMutation({
+      threadId: item.threadId,
+      kind: "update-session-index",
+      targetPath: sessionIndexPath,
+      status: "applied",
+      message: "Updated session_index.jsonl with active-session rollout path evidence.",
+    });
+  }
+}
+
+async function updateSqliteForApply(
+  codexHome: string,
+  items: RestorePlanItem[],
+  sqlRunner: (dbPath: string, sql: string) => Promise<void>,
+  recordMutation: (mutation: RestoreApplyMutation) => void,
+): Promise<void> {
+  const dbPath = path.join(codexHome, STATE_DB);
+  const updates = items.map((item) => {
+    const activePath = activeTargetPathFor(item);
+    if (!activePath) {
+      throw new Error(`Cannot update SQLite row for ${item.threadId}; active target path is unavailable.`);
+    }
+    return `UPDATE threads SET archived = 0, rollout_path = ${sqlValue(activePath)} WHERE id = ${sqlValue(item.threadId)} AND archived != 0;`;
+  });
+
+  const sql = [
+    ".bail on",
+    "BEGIN IMMEDIATE;",
+    ...updates,
+    "COMMIT;",
+  ].join("\n");
+
+  for (const item of items) {
+    recordMutation({
+      threadId: item.threadId,
+      kind: "sqlite-unarchive-thread",
+      targetPath: dbPath,
+      status: "attempted",
+      message: "Attempting SQLite transaction to unarchive thread and point rollout_path at active session JSONL.",
+    });
+  }
+
+  await sqlRunner(dbPath, sql);
+
+  for (const item of items) {
+    recordMutation({
+      threadId: item.threadId,
+      kind: "sqlite-unarchive-thread",
+      targetPath: dbPath,
+      status: "applied",
+      message: "SQLite transaction completed for archived thread row.",
+    });
+  }
+}
+
+async function rollbackCleanup(
+  cleanupActions: Array<() => Promise<void>>,
+  mutations: RestoreApplyMutation[],
+): Promise<void> {
+  for (const cleanup of cleanupActions.reverse()) {
+    try {
+      await cleanup();
+    } catch {
+      // Best-effort cleanup is reflected by the failed apply report.
+    }
+  }
+  for (const mutation of mutations) {
+    if (mutation.status === "applied") {
+      mutation.status = "rolled-back";
+      mutation.message = `${mutation.message} Rolled back after apply failure.`;
+    }
+  }
+}
+
+async function verifyApply(input: {
+  codexHome: string;
+  applyableItems: RestorePlanItem[];
+  startedAt: string;
+}): Promise<RestoreApplyReport["verification"]> {
+  const scan = await scanCodexStorage(input.codexHome);
+  const restoredThreadIds: string[] = [];
+  const failedThreadIds: string[] = [];
+  const evidence: string[] = [];
+
+  for (const item of input.applyableItems) {
+    const scanned = scan.threads.find((thread) => thread.id === item.threadId);
+    const activePath = activeTargetPathFor(item);
+    if (
+      scanned?.restoreStatus === "active" &&
+      scanned.archived === false &&
+      activePath &&
+      scanned.sourcePaths.includes(activePath)
+    ) {
+      restoredThreadIds.push(item.threadId);
+      evidence.push(`${item.threadId}: active with SQLite archived=false and source ${activePath}.`);
+    } else {
+      failedThreadIds.push(item.threadId);
+      evidence.push(`${item.threadId}: verification did not find active restored state.`);
+    }
+  }
+
+  return {
+    status: failedThreadIds.length === 0 ? "succeeded" : restoredThreadIds.length > 0 ? "partial" : "failed",
+    checkedAt: new Date().toISOString(),
+    restoredThreadIds,
+    failedThreadIds,
+    diagnostics: scan.diagnostics,
+    evidence,
+  };
+}
+
+function nextUserSteps(status: RestoreApplyResultStatus, reportPath: string, backupRoot: string): string[] {
+  if (status === "succeeded") {
+    return [
+      "Review the restore report and backup manifest before reopening Codex Desktop.",
+      "Reopen Codex Desktop only after confirming the report status is succeeded.",
+      `Keep backup root ${backupRoot} until PR #8 undo/restore-from-backup support is available.`,
+    ];
+  }
+  return [
+    `Inspect the machine-readable report at ${reportPath}.`,
+    `Keep backup root ${backupRoot}; it contains the pre-mutation state for manual recovery.`,
+    "Do not reopen Codex Desktop as if restore succeeded until verification is clean.",
+  ];
+}
+
+function plannedMutationKinds(item: RestorePlanItem): string[] {
+  if (item.classification !== "archived-sqlite-thread") {
+    return [];
+  }
+  return [
+    "copy-rollout-to-active-session",
+    "update-session-index",
+    "sqlite-unarchive-thread",
+    "rebuild-search-index",
+  ];
+}
+
+function archivedSourcePath(item: RestorePlanItem): string | null {
+  return item.plannedPaths.find((planned) => planned.kind === "archived-source-rollout" && planned.exists)?.path ?? null;
+}
+
+function activeTargetPathFor(item: RestorePlanItem): string | null {
+  return item.plannedPaths.find((planned) => planned.kind === "active-session-target")?.path ?? null;
+}
+
+function sessionIndexRowForItem(item: RestorePlanItem, existing?: unknown): unknown {
+  const activePath = activeTargetPathFor(item);
+  const base = existing && typeof existing === "object" && !Array.isArray(existing)
+    ? { ...(existing as Record<string, unknown>) }
+    : {};
+  const payload = base.payload && typeof base.payload === "object" && !Array.isArray(base.payload)
+    ? { ...(base.payload as Record<string, unknown>) }
+    : {};
+  payload.id = item.threadId;
+  payload.rollout_path = activePath;
+  base.payload = payload;
+  return base;
+}
+
+function sessionIndexRowMatches(codexHome: string, value: unknown, item: RestorePlanItem): boolean {
+  const ids = candidateIds(value);
+  if (ids.includes(item.threadId)) {
+    return true;
+  }
+  const paths = candidatePaths(value).map((candidate) => resolveCodexPath(codexHome, candidate));
+  return item.evidence.sourcePaths.some((sourcePath) => paths.includes(sourcePath));
+}
+
+function candidateIds(value: unknown): string[] {
+  return compact([
+    stringAt(value, ["id"]),
+    stringAt(value, ["thread_id"]),
+    stringAt(value, ["threadId"]),
+    stringAt(value, ["payload", "id"]),
+    stringAt(value, ["payload", "thread_id"]),
+    stringAt(value, ["payload", "threadId"]),
+  ]);
+}
+
+function candidatePaths(value: unknown): string[] {
+  return compact([
+    stringAt(value, ["rollout_path"]),
+    stringAt(value, ["rolloutPath"]),
+    stringAt(value, ["path"]),
+    stringAt(value, ["file"]),
+    stringAt(value, ["payload", "rollout_path"]),
+    stringAt(value, ["payload", "rolloutPath"]),
+    stringAt(value, ["session", "rollout_path"]),
+    stringAt(value, ["session", "rolloutPath"]),
+  ]);
+}
+
+function stringAt(value: unknown, keys: string[]): string | null {
+  let current = value;
+  for (const key of keys) {
+    if (!current || typeof current !== "object" || Array.isArray(current) || !(key in current)) {
+      return null;
+    }
+    current = (current as Record<string, unknown>)[key];
+  }
+  return typeof current === "string" && current.trim().length > 0 ? current : null;
+}
+
+function resolveCodexPath(codexHome: string, rolloutPath: string): string {
+  return path.isAbsolute(rolloutPath) ? rolloutPath : path.join(codexHome, rolloutPath);
+}
+
+function tempSiblingPath(filePath: string): string {
+  return path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
+  );
 }
 
 export async function detectCodexProcesses(): Promise<CodexProcessDetection> {

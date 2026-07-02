@@ -6,7 +6,7 @@ import {
   searchThreads,
 } from "./indexer.js";
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
-import { createRestorePlan } from "./restore.js";
+import { applyRestorePlan, createRestorePlan } from "./restore.js";
 import { scanCodexStorage } from "./scanner.js";
 import { serve } from "./server.js";
 import { diagnoseVisibility } from "./visibility.js";
@@ -136,6 +136,28 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (action === "apply") {
+      const selectedThreadIds = selectedIdsFromArgs(args);
+      if (selectedThreadIds.length === 0) {
+        throw new UsageError("restore apply requires at least one selected thread id.");
+      }
+      console.log(
+        JSON.stringify(
+          await applyRestorePlan({
+            codexHome,
+            indexPath,
+            selectedThreadIds,
+            processCheckMode: parseProcessCheckMode(args),
+            confirmationToken: stringFlag(args, "confirm-token") ?? undefined,
+            confirmationPhrase: stringFlag(args, "confirm-phrase") ?? undefined,
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
     console.error(`Unknown restore action: ${action}`);
     printHelp();
     process.exit(1);
@@ -232,6 +254,7 @@ Usage:
   codex-archiver index clear [--index-path ~/.cache/codex-archiver/index.sqlite]
   codex-archiver diagnose visibility [--timeout-ms 2500] [--no-codex-resume] [--app-server-url http://127.0.0.1:PORT]
   codex-archiver restore plan THREAD_ID... [--ids id-a,id-b] [--codex-home ~/.codex] [--index-path ~/.cache/codex-archiver/index.sqlite] [--process-check warn|strict|skip] [--skip-process-check] [--json]
+  codex-archiver restore apply THREAD_ID... [--ids id-a,id-b] [--confirm-token restore-...] [--confirm-phrase "apply restore restore-..."]
 
 Commands:
   serve   Start the local read-only browser.
@@ -240,7 +263,7 @@ Commands:
   diagnose
           Run read-only diagnostics that compare local/indexed threads with best-effort Codex visibility surfaces.
   restore
-          Create explicit dry-run restore plans. Planning is read-only and never mutates ~/.codex.
+          Create explicit dry-run restore plans and apply the narrow backup-backed archived SQLite restore subset.
 `);
 }
 

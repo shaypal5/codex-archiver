@@ -4,7 +4,7 @@ A local browser and restoration tool for old, archived, hidden, and hard-to-find
 
 ## Status
 
-Early scaffold. The current implementation is read-only: it scans local Codex storage, serves a browser UI, diagnoses visibility, and creates dry-run restore plans, but it does not restore or mutate threads yet.
+Early scaffold. Browsing, scanning, diagnostics, indexing, and restore planning are read-only with respect to `~/.codex`. The intentionally mutating path is limited to `codex-archiver restore apply`, which currently supports only the narrow archived-SQLite restore subset after explicit confirmation, preflight, timestamped backups, and verification.
 
 ## Usage
 
@@ -24,7 +24,7 @@ The first screen shows summary badges for total threads, total projects, and act
 
 The web UI also includes a visibility diagnostics panel. It compares the local scanned/indexed thread universe with best-effort Codex visibility surfaces when they are available, without mutating `~/.codex`.
 
-The browser also lets you select specific threads and generate a dry-run restore plan. The plan previews classifications, preflight checks, blockers, warnings, future backup manifest entries, future report fields, and future mutation targets, but there is no apply/restore button yet.
+The browser also lets you select specific threads and generate a dry-run restore plan. The plan previews classifications, preflight checks, blockers, warnings, backup manifest entries, restore report fields, confirmation token, and mutation targets. Apply is intentionally CLI/API-gated for now.
 
 ## CLI
 
@@ -114,9 +114,18 @@ node dist/cli.js restore plan THREAD_ID --process-check strict
 node dist/cli.js restore plan THREAD_ID --skip-process-check
 ```
 
-The planner classifies selected threads as archived SQLite, JSONL-only archived, UI-hidden active, missing source, already active, not found, or unsupported. It includes impact, preflight, backup manifest, and restore report previews for a future apply phase, but it never creates backups or mutates `~/.codex`.
+The planner classifies selected threads as archived SQLite, JSONL-only archived, UI-hidden active, missing source, already active, not found, or unsupported. Planning includes impact, preflight, backup manifest, restore report previews, and a confirmation token, but it never creates backups or mutates `~/.codex`.
 
-See [docs/restore-planning.md](docs/restore-planning.md) for the `M3-RESTORE-PLAN` and `M3-PREFLIGHT-BACKUP-PREVIEW` contracts, CLI/API details, and safety boundaries.
+Apply the current safe subset with:
+
+```bash
+node dist/cli.js restore plan THREAD_ID --process-check warn
+node dist/cli.js restore apply THREAD_ID --confirm-token restore-...
+```
+
+`restore apply` recomputes the plan immediately before mutation, requires the confirmation token or phrase from the plan, blocks on any non-passing preflight check, creates a timestamped backup root under `~/.cache/codex-archiver/backups`, writes a machine-readable report, then verifies by rescanning. M4 apply supports only archived SQLite threads with existing archived JSONL evidence. JSONL-only archived threads and UI-hidden active threads remain diagnostic-only.
+
+See [docs/restore-planning.md](docs/restore-planning.md) for the `M3-RESTORE-PLAN`, `M3-PREFLIGHT-BACKUP-PREVIEW`, and `M4-RESTORE-APPLY-BACKUPS` contracts, CLI/API details, and safety boundaries.
 
 ## CI
 
@@ -128,4 +137,4 @@ Pull requests run GitHub Actions CI with:
 
 ## Safety
 
-This version is intentionally read-only with respect to `~/.codex`. Backup-backed mutation will be added only in a later restore apply phase.
+The only supported `~/.codex` mutation path is explicit restore apply. Do not run apply while Codex Desktop or related Codex processes are open. Keep the backup root and report until undo/restore-from-backup support lands in a later milestone.
