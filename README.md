@@ -24,7 +24,7 @@ The first screen shows summary badges for total threads, total projects, and act
 
 The web UI also includes a visibility diagnostics panel. It compares the local scanned/indexed thread universe with best-effort Codex visibility surfaces when they are available, without mutating `~/.codex`.
 
-The browser also lets you select specific threads and generate a dry-run restore plan. The plan previews classifications, reasons, future backup targets, and future mutation targets, but there is no apply/restore button yet.
+The browser also lets you select specific threads and generate a dry-run restore plan. The plan previews classifications, preflight checks, blockers, warnings, future backup manifest entries, future report fields, and future mutation targets, but there is no apply/restore button yet.
 
 ## CLI
 
@@ -110,11 +110,13 @@ Create an explicit dry-run restore plan for selected thread ids with:
 ```bash
 node dist/cli.js restore plan THREAD_ID...
 node dist/cli.js restore plan --ids thread-a,thread-b --json
+node dist/cli.js restore plan THREAD_ID --process-check strict
+node dist/cli.js restore plan THREAD_ID --skip-process-check
 ```
 
-The planner classifies selected threads as archived SQLite, JSONL-only archived, UI-hidden active, missing source, already active, not found, or unsupported. It includes impact and backup previews for a future apply phase, but it never creates backups or mutates `~/.codex`.
+The planner classifies selected threads as archived SQLite, JSONL-only archived, UI-hidden active, missing source, already active, not found, or unsupported. It includes impact, preflight, backup manifest, and restore report previews for a future apply phase, but it never creates backups or mutates `~/.codex`.
 
-See [docs/restore-planning.md](docs/restore-planning.md) for the `M3-RESTORE-PLAN` contract, CLI/API details, and safety boundaries.
+See [docs/restore-planning.md](docs/restore-planning.md) for the `M3-RESTORE-PLAN` and `M3-PREFLIGHT-BACKUP-PREVIEW` contracts, CLI/API details, and safety boundaries.
 
 ## CI
 

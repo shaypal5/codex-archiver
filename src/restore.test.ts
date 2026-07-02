@@ -27,6 +27,12 @@ test("restore planner classifies explicit selections without mutating codex home
       "active-thread",
       "unknown-thread",
     ],
+    processDetector: async () => ({
+      status: "checked",
+      processes: [],
+      evidence: ["mock process table checked"],
+    }),
+    now: new Date("2026-07-02T10:00:00.000Z"),
   });
   const after = await snapshotFiles(fixture.codexHome);
 
@@ -36,6 +42,11 @@ test("restore planner classifies explicit selections without mutating codex home
   assert.equal(plan.impactPreview.wouldMutateCodexHome, false);
   assert.equal(plan.impactPreview.wouldCreateBackups, false);
   assert.equal(plan.backupPreview.createdByThisPlan, false);
+  assert.equal(plan.preflight.processCheckMode, "warn");
+  assert.equal(plan.preflight.summary.failed, 2);
+  assert.equal(plan.preflight.summary.passed, 2);
+  assert.equal(plan.preflight.summary.warning, 0);
+  assert.equal(plan.preflight.summary.unknown, 0);
   assert.equal(plan.impactPreview.selectedCount, 6);
   assert.equal(plan.impactPreview.futureApplyCount, 2);
   assert.equal(plan.impactPreview.diagnosticOnlyCount, 1);
@@ -64,6 +75,80 @@ test("restore planner classifies explicit selections without mutating codex home
   assert.equal(archived.evidence.hasArchivedRolloutPath, true);
   assert(archived.backupPreview.some((target) => target.endsWith("state_5.sqlite")));
   assert(archived.mutationPreview.some((target) => target.endsWith("session_index.jsonl")));
+  assert(archived.plannedPaths.some((target) => target.kind === "active-session-target"));
+
+  const stateBackup = plan.backupPreview.targets.find((target) => target.sourcePath.endsWith("state_5.sqlite"));
+  assert(stateBackup);
+  assert.equal(stateBackup.exists, true);
+  assert.equal(stateBackup.hashStatus, "sha256");
+  assert.match(stateBackup.sha256 ?? "", /^[a-f0-9]{64}$/);
+  assert(!plan.backupPreview.targets.some((target) => target.sourcePath.endsWith("active.jsonl")));
+  assert(plan.backupPreview.plannedBackupRoot.includes("restore-2026-07-02T10-00-00-000Z-"));
+  assert.equal(plan.reportPreview.readOnlyPreview, true);
+  assert.equal(plan.reportPreview.wouldWriteReport, false);
+  assert(plan.reportPreview.requiredFields.includes("backupManifest"));
+});
+
+test("restore planner reports process preflight warnings and strict failures without mutation", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore planner tests");
+    return;
+  }
+
+  const fixture = await createFixture(t);
+  const detector = async () => ({
+    status: "checked" as const,
+    processes: [{ pid: 123, command: "/Applications/Codex.app/Contents/MacOS/Codex", matchedBy: "Codex Desktop" }],
+    evidence: ["mock process table checked"],
+  });
+
+  const warningPlan = await createRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    processDetector: detector,
+  });
+  assert.equal(
+    warningPlan.preflight.checks.find((check) => check.id === "codex-processes-closed")?.status,
+    "warning",
+  );
+
+  const strictPlan = await createRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    processCheckMode: "strict",
+    processDetector: detector,
+  });
+  const check = strictPlan.preflight.checks.find((candidate) => candidate.id === "codex-processes-closed");
+  assert.equal(check?.status, "failed");
+  assert.equal(check?.blocking, true);
+});
+
+test("restore planner flags active target conflicts for future apply candidates", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore planner tests");
+    return;
+  }
+
+  const fixture = await createFixture(t, { withTargetConflict: true });
+  const plan = await createRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    processDetector: async () => ({
+      status: "checked",
+      processes: [],
+      evidence: ["mock process table checked"],
+    }),
+  });
+
+  const conflictCheck = plan.preflight.checks.find((check) => check.id === "target-path-conflicts");
+  assert.equal(conflictCheck?.status, "failed");
+  assert.equal(conflictCheck?.blocking, true);
+  const archived = plan.items.find((item) => item.threadId === "archived-thread");
+  assert(archived?.validations.some((validation) => validation.id === "target-path-conflict"));
+  assert(plan.backupPreview.targets.some((target) => target.kind === "active-session-target" && target.exists));
 });
 
 test("restore plan CLI returns dry-run JSON for selected ids", async (t) => {
@@ -87,6 +172,7 @@ test("restore plan CLI returns dry-run JSON for selected ids", async (t) => {
       "--index-path",
       fixture.indexPath,
       "--json",
+      "--skip-process-check",
     ],
     { encoding: "utf8" },
   );
@@ -95,11 +181,14 @@ test("restore plan CLI returns dry-run JSON for selected ids", async (t) => {
     mutationAllowed?: boolean;
     selectedThreadIds?: string[];
     items?: Array<{ threadId: string; classification: string }>;
+    preflight?: { processCheckMode: string; checks: Array<{ id: string; status: string }> };
   };
   assert.equal(parsed.readOnly, true);
   assert.equal(parsed.mutationAllowed, false);
   assert.deepEqual(parsed.selectedThreadIds, ["archived-thread", "hidden-thread", "unknown-thread"]);
   assert.equal(parsed.items?.find((item) => item.threadId === "hidden-thread")?.classification, "ui-hidden-active-thread");
+  assert.equal(parsed.preflight?.processCheckMode, "skip");
+  assert.equal(parsed.preflight?.checks.find((check) => check.id === "codex-processes-closed")?.status, "unknown");
 });
 
 test("restore plan API requires local intent guard for POST and returns dry-run plan", async (t) => {
@@ -123,7 +212,7 @@ test("restore plan API requires local intent guard for POST and returns dry-run 
   const address = server.address();
   assert(address && typeof address === "object");
   const url = `http://127.0.0.1:${address.port}/api/restore/plan`;
-  const body = JSON.stringify({ selectedThreadIds: ["archived-thread"] });
+  const body = JSON.stringify({ selectedThreadIds: ["archived-thread"], processCheck: "skip" });
 
   const missingIntent = await fetch(url, {
     method: "POST",
@@ -153,6 +242,16 @@ test("restore plan API requires local intent guard for POST and returns dry-run 
   });
   assert.equal(invalidJson.status, 400);
 
+  const invalidProcessCheck = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Codex-Archiver-Intent": "local-api",
+    },
+    body: JSON.stringify({ selectedThreadIds: ["archived-thread"], processCheck: "enforce" }),
+  });
+  assert.equal(invalidProcessCheck.status, 400);
+
   const accepted = await fetch(url, {
     method: "POST",
     headers: {
@@ -167,14 +266,23 @@ test("restore plan API requires local intent guard for POST and returns dry-run 
     readOnly?: boolean;
     mutationAllowed?: boolean;
     items?: Array<{ threadId: string; actionability: string }>;
+    preflight?: { processCheckMode: string };
+    backupPreview?: { targets: Array<{ sourcePath: string; exists: boolean }> };
+    reportPreview?: { requiredFields: string[] };
   };
   assert.equal(plan.readOnly, true);
   assert.equal(plan.mutationAllowed, false);
   assert.equal(plan.items?.[0]?.threadId, "archived-thread");
   assert.equal(plan.items?.[0]?.actionability, "future-apply");
+  assert.equal(plan.preflight?.processCheckMode, "skip");
+  assert(plan.backupPreview?.targets.some((target) => target.sourcePath.endsWith("state_5.sqlite") && target.exists));
+  assert(plan.reportPreview?.requiredFields.includes("undoPlan"));
 });
 
-async function createFixture(t: TestContext): Promise<{ root: string; codexHome: string; indexPath: string }> {
+async function createFixture(
+  t: TestContext,
+  options: { withTargetConflict?: boolean } = {},
+): Promise<{ root: string; codexHome: string; indexPath: string }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "codex-archiver-restore-test-"));
   const codexHome = path.join(root, ".codex");
   const indexPath = path.join(root, "cache", "index.sqlite");
@@ -190,6 +298,7 @@ async function createFixture(t: TestContext): Promise<{ root: string; codexHome:
   const archivedPath = path.join(codexHome, "archived_sessions", "archived.jsonl");
   const restorablePath = path.join(codexHome, "archived_sessions", "restorable.jsonl");
   const missingPath = path.join(codexHome, "sessions", "missing.jsonl");
+  const conflictPath = path.join(codexHome, "sessions", "archived.jsonl");
 
   await writeJsonl(activePath, [
     {
@@ -219,6 +328,15 @@ async function createFixture(t: TestContext): Promise<{ root: string; codexHome:
       payload: { id: "restorable-thread", cwd: "/tmp/project-c" },
     },
   ]);
+  if (options.withTargetConflict) {
+    await writeJsonl(conflictPath, [
+      {
+        timestamp: "2026-06-01T09:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "conflict-thread", cwd: "/tmp/project-conflict" },
+      },
+    ]);
+  }
   await writeFile(
     path.join(codexHome, "session_index.jsonl"),
     `${JSON.stringify({ payload: { id: "active-thread", rollout_path: activePath } })}\n`,

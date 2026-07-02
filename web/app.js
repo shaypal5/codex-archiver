@@ -243,12 +243,43 @@ function renderRestorePlan(plan) {
     plan.generatedAt,
   ).toLocaleString()}. No backups or Codex mutations were performed.`;
   elements.restorePlanOutput.replaceChildren(
+    restorePreflight(plan.preflight),
     restoreSummary(plan.impactPreview),
     restoreNote(
-      `Future apply would require backups under ${plan.backupPreview.backupRootPattern}. This dry run created none.`,
+      `Future apply would require backups under ${plan.backupPreview.plannedBackupRoot}. This dry run created none.`,
     ),
+    restoreBackupPreview(plan.backupPreview),
+    restoreReportPreview(plan.reportPreview),
     ...plan.items.map(restorePlanItem),
   );
+}
+
+function restorePreflight(preflight) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "preflight";
+  const header = document.createElement("div");
+  header.className = "preflight-header";
+  const title = document.createElement("strong");
+  title.textContent = "Preflight";
+  const summary = document.createElement("span");
+  summary.textContent = `${preflight.summary.failed} failed, ${preflight.summary.warning} warning, ${preflight.summary.unknown} unknown`;
+  header.append(title, summary);
+  wrapper.append(header);
+  wrapper.append(
+    ...preflight.checks.map((check) => {
+      const item = document.createElement("div");
+      item.className = `preflight-check ${check.status}`;
+      const label = document.createElement("strong");
+      label.textContent = check.label;
+      const status = document.createElement("span");
+      status.textContent = check.status;
+      const detail = document.createElement("p");
+      detail.textContent = check.evidence[0] || check.remediation;
+      item.append(label, status, detail);
+      return item;
+    }),
+  );
+  return wrapper;
 }
 
 function restoreSummary(impact) {
@@ -283,6 +314,28 @@ function restorePlanItem(item) {
   if (item.backupPreview.length > 0) {
     wrapper.append(reasonList("Backup preview", item.backupPreview.slice(0, 6)));
   }
+  const issues = item.validations.filter(
+    (validation) => validation.status === "failed" || validation.status === "warning",
+  );
+  if (issues.length > 0) {
+    wrapper.append(reasonList("Validation", issues.map((validation) => validation.message)));
+  }
+  return wrapper;
+}
+
+function restoreBackupPreview(backupPreview) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "restore-note";
+  const existing = backupPreview.targets.filter((target) => target.exists).length;
+  const missing = backupPreview.targets.length - existing;
+  wrapper.textContent = `Backup manifest preview: ${existing} existing target(s), ${missing} missing/non-file target(s), report-only hashes for small files.`;
+  return wrapper;
+}
+
+function restoreReportPreview(reportPreview) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "restore-note";
+  wrapper.textContent = `Report preview: ${reportPreview.requiredFields.length} required fields planned at ${reportPreview.plannedReportPath}. No report was written.`;
   return wrapper;
 }
 

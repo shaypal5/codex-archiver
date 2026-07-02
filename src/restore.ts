@@ -1,4 +1,8 @@
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import { defaultCodexHome, defaultIndexPath, expandHome } from "./paths.js";
 import { scanCodexStorage } from "./scanner.js";
 import type {
@@ -6,10 +10,18 @@ import type {
   RestorePlan,
   RestorePlanActionability,
   RestorePlanBackupPreview,
+  RestorePlanBackupTarget,
   RestorePlanClassification,
   RestorePlanEvidence,
   RestorePlanImpactPreview,
   RestorePlanItem,
+  RestorePlanPlannedPath,
+  RestorePlanPreflight,
+  RestorePlanPreflightCheck,
+  RestorePlanReportPreview,
+  RestorePlanValidation,
+  RestorePreflightStatus,
+  RestoreProcessCheckMode,
   ThreadRecord,
 } from "./types.js";
 
@@ -17,10 +29,30 @@ export interface RestorePlanOptions {
   codexHome?: string;
   indexPath?: string;
   selectedThreadIds: string[];
+  processCheckMode?: RestoreProcessCheckMode;
+  processDetector?: CodexProcessDetector;
+  now?: Date;
 }
+
+export interface CodexProcessDetection {
+  status: "checked" | "unavailable";
+  processes: CodexProcessInfo[];
+  evidence: string[];
+  error?: string;
+}
+
+export interface CodexProcessInfo {
+  pid: number | null;
+  command: string;
+  matchedBy: string;
+}
+
+export type CodexProcessDetector = () => Promise<CodexProcessDetection>;
 
 const STATE_DB = "state_5.sqlite";
 const SESSION_INDEX = "session_index.jsonl";
+const HASH_MAX_BYTES = 8 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
 
 export async function createRestorePlan(options: RestorePlanOptions): Promise<RestorePlan> {
   const codexHome = path.resolve(expandHome(options.codexHome ?? defaultCodexHome()));
@@ -33,37 +65,219 @@ export async function createRestorePlan(options: RestorePlanOptions): Promise<Re
     diagnostics: scan.diagnostics,
     threads: scan.threads,
     selectedThreadIds,
+    processCheckMode: options.processCheckMode ?? "warn",
+    processDetector: options.processDetector,
+    now: options.now,
   });
 }
 
-export function createRestorePlanFromThreads(input: {
+export async function createRestorePlanFromThreads(input: {
   codexHome: string;
   indexPath: string;
   diagnostics?: Diagnostic[];
   threads: ThreadRecord[];
   selectedThreadIds: string[];
-}): RestorePlan {
+  processCheckMode?: RestoreProcessCheckMode;
+  processDetector?: CodexProcessDetector;
+  now?: Date;
+}): Promise<RestorePlan> {
   const codexHome = path.resolve(input.codexHome);
   const indexPath = path.resolve(input.indexPath);
   const selectedThreadIds = normalizeSelectedThreadIds(input.selectedThreadIds);
+  const generatedAt = (input.now ?? new Date()).toISOString();
   const byId = new Map(input.threads.map((thread) => [thread.id, thread]));
   const items = selectedThreadIds.map((threadId) =>
     planThread({ codexHome, indexPath, threadId, thread: byId.get(threadId) }),
   );
-  const backupPreview = buildBackupPreview(indexPath, items);
+  const backupRoot = plannedBackupRoot(indexPath, generatedAt, selectedThreadIds);
+  const backupPreview = buildBackupPreview(codexHome, indexPath, backupRoot, items);
+  const reportPreview = buildReportPreview(backupRoot);
+  const preflight = await buildPreflight({
+    items,
+    processCheckMode: input.processCheckMode ?? "warn",
+    processDetector: input.processDetector ?? detectCodexProcesses,
+  });
 
   return {
     codexHome,
     indexPath,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     selectedThreadIds,
     readOnly: true,
     mutationAllowed: false,
     diagnostics: input.diagnostics ?? [],
     impactPreview: buildImpactPreview(items),
+    preflight,
     backupPreview,
+    reportPreview,
     items,
   };
+}
+
+async function buildPreflight(input: {
+  items: RestorePlanItem[];
+  processCheckMode: RestoreProcessCheckMode;
+  processDetector: CodexProcessDetector;
+}): Promise<RestorePlanPreflight> {
+  const checks = [
+    selectedIdsCheck(input.items),
+    rolloutSourceCheck(input.items),
+    targetConflictCheck(input.items),
+    await codexClosedCheck(input.processCheckMode, input.processDetector),
+  ];
+
+  return {
+    processCheckMode: input.processCheckMode,
+    checks,
+    summary: {
+      passed: countStatus(checks, "passed"),
+      warning: countStatus(checks, "warning"),
+      failed: countStatus(checks, "failed"),
+      unknown: countStatus(checks, "unknown"),
+      hasFailures: checks.some((check) => check.status === "failed"),
+      hasWarnings: checks.some((check) => check.status === "warning"),
+    },
+  };
+}
+
+function selectedIdsCheck(items: RestorePlanItem[]): RestorePlanPreflightCheck {
+  const missing = items.filter((item) => !item.evidence.threadFound).map((item) => item.threadId);
+  if (missing.length === 0) {
+    return {
+      id: "selected-ids-present",
+      label: "Selected IDs still present",
+      status: "passed",
+      blocking: false,
+      evidence: [`${items.length} selected id(s) matched current local scan evidence.`],
+      remediation: "No action needed.",
+    };
+  }
+
+  return {
+    id: "selected-ids-present",
+    label: "Selected IDs still present",
+    status: "failed",
+    blocking: true,
+    evidence: missing.map((id) => `${id}: not found in current SQLite, sessions, or archived sessions scan.`),
+    remediation: "Refresh the index, re-scan local Codex state, and select only thread IDs that still exist.",
+  };
+}
+
+function rolloutSourceCheck(items: RestorePlanItem[]): RestorePlanPreflightCheck {
+  const missing = items.filter((item) => item.evidence.threadFound && item.evidence.existsOnDisk === false);
+  if (missing.length === 0) {
+    return {
+      id: "rollout-sources-exist",
+      label: "Rollout/session sources exist",
+      status: "passed",
+      blocking: false,
+      evidence: ["All selected threads that need source JSONL evidence still have files on disk."],
+      remediation: "No action needed.",
+    };
+  }
+
+  return {
+    id: "rollout-sources-exist",
+    label: "Rollout/session sources exist",
+    status: "failed",
+    blocking: true,
+    evidence: missing.map((item) => `${item.threadId}: missing ${item.evidence.rolloutPath ?? "rollout path"}.`),
+    remediation: "Recover the missing JSONL source files or exclude those thread IDs before any future apply.",
+  };
+}
+
+function targetConflictCheck(items: RestorePlanItem[]): RestorePlanPreflightCheck {
+  const conflicts = items.flatMap((item) =>
+    item.validations.filter(
+      (validation) =>
+        validation.id === "target-path-conflict" &&
+        (validation.status === "failed" || validation.status === "warning"),
+    ),
+  );
+  const failed = conflicts.filter((validation) => validation.status === "failed");
+  if (conflicts.length === 0) {
+    return {
+      id: "target-path-conflicts",
+      label: "Target path conflicts",
+      status: "passed",
+      blocking: false,
+      evidence: ["No unexpected active/archive target path conflicts were detected for future apply candidates."],
+      remediation: "No action needed.",
+    };
+  }
+
+  return {
+    id: "target-path-conflicts",
+    label: "Target path conflicts",
+    status: failed.length > 0 ? "failed" : "warning",
+    blocking: failed.length > 0,
+    evidence: conflicts.flatMap((validation) => validation.evidence),
+    remediation: failed.length > 0
+      ? "Inspect the existing target files and remove conflicting selections before any future apply."
+      : "Review the warnings before any future apply.",
+  };
+}
+
+async function codexClosedCheck(
+  mode: RestoreProcessCheckMode,
+  detector: CodexProcessDetector,
+): Promise<RestorePlanPreflightCheck> {
+  if (mode === "skip") {
+    return {
+      id: "codex-processes-closed",
+      label: "Codex processes closed",
+      status: "unknown",
+      blocking: false,
+      evidence: ["Process detection was skipped by option."],
+      remediation: "Before applying a future restore, close Codex Desktop, any local app-server, and related codex processes.",
+    };
+  }
+
+  try {
+    const detection = await detector();
+    if (detection.status === "unavailable") {
+      return {
+        id: "codex-processes-closed",
+        label: "Codex processes closed",
+        status: "unknown",
+        blocking: false,
+        evidence: detection.evidence.length > 0
+          ? detection.evidence
+          : [detection.error ?? "The process list could not be inspected on this platform."],
+        remediation: "Manually confirm Codex Desktop and related codex processes are closed before future apply.",
+      };
+    }
+    if (detection.processes.length === 0) {
+      return {
+        id: "codex-processes-closed",
+        label: "Codex processes closed",
+        status: "passed",
+        blocking: false,
+        evidence: detection.evidence.length > 0 ? detection.evidence : ["No matching Codex processes were detected."],
+        remediation: "No action needed.",
+      };
+    }
+
+    return {
+      id: "codex-processes-closed",
+      label: "Codex processes closed",
+      status: mode === "strict" ? "failed" : "warning",
+      blocking: mode === "strict",
+      evidence: detection.processes.map((process) =>
+        `pid=${process.pid ?? "unknown"} match=${process.matchedBy} command=${process.command}`,
+      ),
+      remediation: "Close Codex Desktop, app-server, and codex CLI/server processes before any future apply.",
+    };
+  } catch (error) {
+    return {
+      id: "codex-processes-closed",
+      label: "Codex processes closed",
+      status: "unknown",
+      blocking: false,
+      evidence: [`Process detection failed: ${errorMessage(error)}`],
+      remediation: "Manually confirm Codex Desktop and related codex processes are closed before future apply.",
+    };
+  }
 }
 
 function planThread(input: {
@@ -86,6 +300,8 @@ function planThread(input: {
       futureActions: [],
       backupPreview: [],
       mutationPreview: [],
+      plannedPaths: [],
+      validations: [],
     };
   }
 
@@ -94,6 +310,7 @@ function planThread(input: {
   const sessionIndexPath = path.join(codexHome, SESSION_INDEX);
   const sourceBackups = thread.sourcePaths.length > 0 ? thread.sourcePaths : compact([thread.rolloutPath]);
   const standardBackups = [stateDbPath, sessionIndexPath, ...sourceBackups, indexPath];
+  const targetPaths = plannedTargetPaths(codexHome, thread, evidence);
 
   if (!thread.existsOnDisk) {
     return itemForThread(thread, {
@@ -107,6 +324,8 @@ function planThread(input: {
       futureActions: ["Locate or recover the missing rollout/session JSONL file, then run restore planning again."],
       backupPreview: [],
       mutationPreview: [],
+      plannedPaths: plannedPaths(stateDbPath, sessionIndexPath, sourceBackups, targetPaths, indexPath, false),
+      validations: sourceValidations(thread, targetPaths),
     });
   }
 
@@ -122,6 +341,8 @@ function planThread(input: {
       futureActions: [],
       backupPreview: [],
       mutationPreview: [],
+      plannedPaths: plannedPaths(stateDbPath, sessionIndexPath, sourceBackups, targetPaths, indexPath, false),
+      validations: sourceValidations(thread, targetPaths),
     });
   }
 
@@ -140,8 +361,10 @@ function planThread(input: {
         "Relink or refresh session_index.jsonl so Codex can discover the active thread.",
         "Rebuild the derived codex-archiver search index after Codex state changes.",
       ],
-      backupPreview: standardBackups,
+      backupPreview: unique([...standardBackups, ...existingTargetPaths(targetPaths)]),
       mutationPreview: [stateDbPath, sessionIndexPath, indexPath],
+      plannedPaths: plannedPaths(stateDbPath, sessionIndexPath, sourceBackups, targetPaths, indexPath, true),
+      validations: sourceValidations(thread, targetPaths),
     });
   }
 
@@ -160,8 +383,10 @@ function planThread(input: {
         "Add or refresh the session_index.jsonl entry for the selected thread.",
         "Rebuild the derived codex-archiver search index after Codex state changes.",
       ],
-      backupPreview: standardBackups,
+      backupPreview: unique([...standardBackups, ...existingTargetPaths(targetPaths)]),
       mutationPreview: [stateDbPath, sessionIndexPath, indexPath],
+      plannedPaths: plannedPaths(stateDbPath, sessionIndexPath, sourceBackups, targetPaths, indexPath, true),
+      validations: sourceValidations(thread, targetPaths),
     });
   }
 
@@ -180,6 +405,8 @@ function planThread(input: {
       ],
       backupPreview: [sessionIndexPath, ...sourceBackups, indexPath],
       mutationPreview: [sessionIndexPath, indexPath],
+      plannedPaths: plannedPaths(stateDbPath, sessionIndexPath, sourceBackups, targetPaths, indexPath, true),
+      validations: sourceValidations(thread, targetPaths),
     });
   }
 
@@ -193,6 +420,8 @@ function planThread(input: {
     futureActions: ["Collect more source evidence or add an explicit planner case before any apply phase."],
     backupPreview: [],
     mutationPreview: [],
+    plannedPaths: plannedPaths(stateDbPath, sessionIndexPath, sourceBackups, targetPaths, indexPath, false),
+    validations: sourceValidations(thread, targetPaths),
   });
 }
 
@@ -206,6 +435,8 @@ function itemForThread(
     futureActions: string[];
     backupPreview: string[];
     mutationPreview: string[];
+    plannedPaths: RestorePlanPlannedPath[];
+    validations: RestorePlanValidation[];
   },
 ): RestorePlanItem {
   return {
@@ -263,22 +494,198 @@ function buildImpactPreview(items: RestorePlanItem[]): RestorePlanImpactPreview 
   };
 }
 
-function buildBackupPreview(indexPath: string, items: RestorePlanItem[]): RestorePlanBackupPreview {
+function buildBackupPreview(
+  codexHome: string,
+  indexPath: string,
+  backupRoot: string,
+  items: RestorePlanItem[],
+): RestorePlanBackupPreview {
+  const allPlanned = items.flatMap((item) => item.plannedPaths.filter((planned) => planned.requiredBeforeApply));
+  const byPath = new Map<string, RestorePlanPlannedPath>();
+  for (const planned of allPlanned) {
+    const existing = byPath.get(planned.path);
+    byPath.set(planned.path, {
+      ...planned,
+      requiredBeforeApply: planned.requiredBeforeApply || existing?.requiredBeforeApply === true,
+    });
+  }
+  const targets = Array.from(byPath.values()).map((planned) => backupTarget(codexHome, indexPath, backupRoot, planned));
+
   return {
     requiredBeforeApply: items.some((item) => item.backupPreview.length > 0),
     createdByThisPlan: false,
     backupRootPattern: path.join(
       path.dirname(indexPath),
       "backups",
-      "restore-YYYYMMDD-HHMMSS",
+      "restore-YYYYMMDD-HHMMSS-selectionhash",
     ),
+    plannedBackupRoot: backupRoot,
     targetsIfApplied: unique(items.flatMap((item) => item.backupPreview)),
+    targets,
     notes: [
       "This restore plan is a dry run and does not create backups.",
       "A future apply phase must create timestamped backups before mutating Codex state.",
       "The future apply phase must use a transaction-backed SQLite update plan and emit a machine-readable report.",
     ],
   };
+}
+
+function backupTarget(
+  codexHome: string,
+  indexPath: string,
+  backupRoot: string,
+  planned: RestorePlanPlannedPath,
+): RestorePlanBackupTarget {
+  const metadata = fileMetadata(planned.path);
+  return {
+    sourcePath: planned.path,
+    backupPath: path.join(backupRoot, backupRelativePath(codexHome, indexPath, planned.path)),
+    kind: planned.kind,
+    exists: metadata.exists,
+    sizeBytes: metadata.sizeBytes,
+    mtimeMs: metadata.mtimeMs,
+    sha256: metadata.sha256,
+    hashStatus: metadata.hashStatus,
+    requiredBeforeApply: planned.requiredBeforeApply,
+  };
+}
+
+function buildReportPreview(backupRoot: string): RestorePlanReportPreview {
+  return {
+    schemaVersion: 1,
+    reportType: "restore-apply-report",
+    readOnlyPreview: true,
+    wouldWriteReport: false,
+    plannedReportPath: path.join(backupRoot, "restore-report.json"),
+    requiredFields: [
+      "schemaVersion",
+      "operationId",
+      "startedAt",
+      "completedAt",
+      "codexHome",
+      "selectedThreadIds",
+      "preflight",
+      "backupManifest",
+      "items",
+      "transactionPlan",
+      "undoPlan",
+      "result",
+    ],
+    itemFields: [
+      "threadId",
+      "classification",
+      "actionability",
+      "sourcePaths",
+      "plannedMutations",
+      "appliedMutations",
+      "warnings",
+      "errors",
+    ],
+    undoFields: [
+      "backupRoot",
+      "stateDbBackup",
+      "sessionIndexBackup",
+      "rolloutFileBackups",
+      "searchIndexBackup",
+      "restoreSteps",
+    ],
+    notes: [
+      "Planning previews the report schema but does not write a report file.",
+      "Future apply must write this report next to the backup manifest before reporting success.",
+    ],
+  };
+}
+
+function plannedPaths(
+  stateDbPath: string,
+  sessionIndexPath: string,
+  sourcePaths: string[],
+  targetPaths: RestorePlanPlannedPath[],
+  indexPath: string,
+  requiredBeforeApply: boolean,
+): RestorePlanPlannedPath[] {
+  return uniqueByPath([
+    { kind: "state-db", path: stateDbPath, exists: pathExists(stateDbPath), requiredBeforeApply },
+    { kind: "session-index", path: sessionIndexPath, exists: pathExists(sessionIndexPath), requiredBeforeApply },
+    ...sourcePaths.map((sourcePath): RestorePlanPlannedPath => ({
+      kind: sourcePath.includes(`${path.sep}archived_sessions${path.sep}`)
+        ? "archived-source-rollout"
+        : "source-rollout",
+      path: sourcePath,
+      exists: pathExists(sourcePath),
+      requiredBeforeApply,
+    })),
+    ...targetPaths,
+    { kind: "search-index", path: indexPath, exists: pathExists(indexPath), requiredBeforeApply },
+  ]);
+}
+
+function sourceValidations(
+  thread: ThreadRecord,
+  targetPaths: RestorePlanPlannedPath[],
+): RestorePlanValidation[] {
+  const validations: RestorePlanValidation[] = [];
+  if (thread.existsOnDisk) {
+    validations.push({
+      id: "source-file-present",
+      status: "passed",
+      message: "Source rollout/session JSONL is present.",
+      evidence: allCandidatePaths(thread).map((sourcePath) => `${sourcePath}: ${pathExists(sourcePath) ? "exists" : "missing"}`),
+      remediation: "No action needed.",
+    });
+  } else {
+    validations.push({
+      id: "source-file-present",
+      status: "failed",
+      message: "Source rollout/session JSONL is missing.",
+      evidence: allCandidatePaths(thread).map((sourcePath) => `${sourcePath}: missing`),
+      remediation: "Recover the missing JSONL source before planning a future apply.",
+    });
+  }
+
+  for (const targetPath of targetPaths) {
+    if (targetPath.exists === true && !allCandidatePaths(thread).includes(targetPath.path)) {
+      validations.push({
+        id: "target-path-conflict",
+        status: "failed",
+        message: "A planned future target path already exists outside the selected thread evidence.",
+        evidence: [`${targetPath.kind}: ${targetPath.path}`],
+        remediation: "Inspect the existing file and do not apply restoration until the target conflict is resolved.",
+      });
+    }
+  }
+
+  return validations;
+}
+
+function plannedTargetPaths(
+  codexHome: string,
+  thread: ThreadRecord,
+  evidence: RestorePlanEvidence,
+): RestorePlanPlannedPath[] {
+  if (!evidence.hasArchivedRolloutPath) {
+    return [];
+  }
+
+  const archiveRoot = path.resolve(codexHome, "archived_sessions");
+  const activeRoot = path.resolve(codexHome, "sessions");
+  const archivedSources = allCandidatePaths(thread)
+    .map((sourcePath) => path.resolve(sourcePath))
+    .filter((sourcePath) => sourcePath.startsWith(`${archiveRoot}${path.sep}`));
+
+  return archivedSources.map((sourcePath): RestorePlanPlannedPath => {
+    const activePath = path.join(activeRoot, path.relative(archiveRoot, sourcePath));
+    return {
+      kind: "active-session-target",
+      path: activePath,
+      exists: pathExists(activePath),
+      requiredBeforeApply: pathExists(activePath),
+    };
+  });
+}
+
+function existingTargetPaths(targetPaths: RestorePlanPlannedPath[]): string[] {
+  return targetPaths.filter((targetPath) => targetPath.exists === true).map((targetPath) => targetPath.path);
 }
 
 function hasSourceUnder(codexHome: string, thread: ThreadRecord, dirName: string): boolean {
@@ -298,10 +705,227 @@ function count(items: RestorePlanItem[], actionability: RestorePlanActionability
   return items.filter((item) => item.actionability === actionability).length;
 }
 
+function countStatus(items: Array<{ status: RestorePreflightStatus }>, status: RestorePreflightStatus): number {
+  return items.filter((item) => item.status === status).length;
+}
+
 function compact(values: Array<string | null>): string[] {
   return values.filter((value): value is string => typeof value === "string" && value.length > 0);
 }
 
 function unique(values: string[]): string[] {
   return Array.from(new Set(values));
+}
+
+function uniqueByPath(values: RestorePlanPlannedPath[]): RestorePlanPlannedPath[] {
+  const byPath = new Map<string, RestorePlanPlannedPath>();
+  for (const value of values) {
+    const existing = byPath.get(value.path);
+    byPath.set(value.path, {
+      ...value,
+      exists: value.exists ?? existing?.exists ?? null,
+      requiredBeforeApply: value.requiredBeforeApply || existing?.requiredBeforeApply === true,
+    });
+  }
+  return Array.from(byPath.values());
+}
+
+function pathExists(filePath: string): boolean {
+  return existsSync(filePath);
+}
+
+function fileMetadata(filePath: string): {
+  exists: boolean;
+  sizeBytes: number | null;
+  mtimeMs: number | null;
+  sha256: string | null;
+  hashStatus: RestorePlanBackupTarget["hashStatus"];
+} {
+  try {
+    const stat = statSync(filePath);
+    if (!stat.isFile()) {
+      return { exists: false, sizeBytes: null, mtimeMs: null, sha256: null, hashStatus: "missing" };
+    }
+    if (stat.size > HASH_MAX_BYTES) {
+      return {
+        exists: true,
+        sizeBytes: stat.size,
+        mtimeMs: stat.mtimeMs,
+        sha256: null,
+        hashStatus: "skipped-large-file",
+      };
+    }
+    return {
+      exists: true,
+      sizeBytes: stat.size,
+      mtimeMs: stat.mtimeMs,
+      sha256: createHash("sha256").update(readFileSync(filePath)).digest("hex"),
+      hashStatus: "sha256",
+    };
+  } catch {
+    return { exists: false, sizeBytes: null, mtimeMs: null, sha256: null, hashStatus: "missing" };
+  }
+}
+
+function plannedBackupRoot(indexPath: string, generatedAt: string, selectedThreadIds: string[]): string {
+  const timestamp = generatedAt.replaceAll(/[:.]/g, "-");
+  const selectionHash = createHash("sha256")
+    .update(selectedThreadIds.join("\n"))
+    .digest("hex")
+    .slice(0, 12);
+  return path.join(path.dirname(indexPath), "backups", `restore-${timestamp}-${selectionHash}`);
+}
+
+function backupRelativePath(codexHome: string, indexPath: string, filePath: string): string {
+  const indexDir = path.dirname(indexPath);
+  const absolute = path.resolve(filePath);
+  if (absolute === path.resolve(indexPath)) {
+    return path.join("cache", path.basename(indexPath));
+  }
+  const resolvedCodexHome = path.resolve(codexHome);
+  if (absolute === resolvedCodexHome || absolute.startsWith(`${resolvedCodexHome}${path.sep}`)) {
+    return path.join("codex-home", path.relative(resolvedCodexHome, absolute));
+  }
+  const relativeToIndex = path.relative(indexDir, absolute);
+  if (!relativeToIndex.startsWith("..") && !path.isAbsolute(relativeToIndex)) {
+    return path.join("cache-relative", relativeToIndex);
+  }
+  return path.join("absolute", absolute.replaceAll(path.sep, "__"));
+}
+
+export async function detectCodexProcesses(): Promise<CodexProcessDetection> {
+  if (process.platform === "win32") {
+    return detectWindowsProcesses();
+  }
+  return detectPosixProcesses();
+}
+
+async function detectPosixProcesses(): Promise<CodexProcessDetection> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-axo", "pid=,comm=,args="], {
+      timeout: 2500,
+      maxBuffer: 1024 * 1024,
+    });
+    const processes = stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map(parsePosixProcessLine)
+      .filter((processInfo): processInfo is CodexProcessInfo => processInfo !== null)
+      .filter((processInfo) => processInfo.pid !== process.pid);
+
+    return {
+      status: "checked",
+      processes,
+      evidence: processes.length === 0
+        ? ["Inspected local process table with ps; no Codex Desktop/app-server/codex processes matched."]
+        : [`Inspected local process table with ps; ${processes.length} matching process(es) found.`],
+    };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      processes: [],
+      evidence: [],
+      error: errorMessage(error),
+    };
+  }
+}
+
+async function detectWindowsProcesses(): Promise<CodexProcessDetection> {
+  try {
+    const { stdout } = await execFileAsync("tasklist", ["/FO", "CSV", "/V"], {
+      timeout: 2500,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    });
+    const processes = stdout
+      .split("\n")
+      .slice(1)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map(parseWindowsTaskLine)
+      .filter((processInfo): processInfo is CodexProcessInfo => processInfo !== null)
+      .filter((processInfo) => processInfo.pid !== process.pid);
+
+    return {
+      status: "checked",
+      processes,
+      evidence: processes.length === 0
+        ? ["Inspected local process table with tasklist; no Codex Desktop/app-server/codex processes matched."]
+        : [`Inspected local process table with tasklist; ${processes.length} matching process(es) found.`],
+    };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      processes: [],
+      evidence: [],
+      error: errorMessage(error),
+    };
+  }
+}
+
+function parsePosixProcessLine(line: string): CodexProcessInfo | null {
+  const match = line.match(/^(\d+)\s+(\S+)\s+(.*)$/);
+  if (!match) {
+    return null;
+  }
+  const [, pid, commandName, args] = match;
+  return processMatch(Number(pid), `${commandName} ${args}`.trim());
+}
+
+function parseWindowsTaskLine(line: string): CodexProcessInfo | null {
+  const columns = csvColumns(line);
+  if (columns.length < 2) {
+    return null;
+  }
+  return processMatch(Number(columns[1]), columns.join(" "));
+}
+
+function processMatch(pid: number, command: string): CodexProcessInfo | null {
+  const normalized = command.toLowerCase();
+  const currentScript = process.argv.join(" ").toLowerCase();
+  if (currentScript && normalized.includes(currentScript)) {
+    return null;
+  }
+
+  const patterns = [
+    { label: "Codex Desktop", pattern: /\bcodex desktop\b|\bcodex\.app\b|\/codex(?:\.app)?\/contents\//i },
+    { label: "Codex app-server", pattern: /\bapp-server\b.*\bcodex\b|\bcodex\b.*\bapp-server\b/i },
+    { label: "codex process", pattern: /(^|[\\/\s])codex(\.exe)?($|[\s-])/i },
+  ];
+  for (const pattern of patterns) {
+    if (pattern.pattern.test(command) && !normalized.includes("codex-archiver")) {
+      return {
+        pid: Number.isFinite(pid) ? pid : null,
+        command,
+        matchedBy: pattern.label,
+      };
+    }
+  }
+  return null;
+}
+
+function csvColumns(line: string): string[] {
+  const columns: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (char === "," && !quoted) {
+      columns.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  columns.push(current);
+  return columns;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
