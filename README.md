@@ -49,7 +49,7 @@ codex-archiver --version
 codex-archiver serve
 ```
 
-`npm pack` runs the TypeScript build through `prepack`. Package artifacts include the compiled CLI/server, top-level `web/` assets used by `codex-archiver serve`, README, license, and docs. Source files, tests, GitHub workflow files, local worktrees, and package smoke-test scripts are intentionally excluded from the install artifact.
+`npm pack` runs the TypeScript build through `prepack`. Package artifacts include the compiled CLI/server, top-level `web/` assets used by `codex-archiver serve`, README, license, and user-facing docs. Source files, tests, GitHub workflow files, local worktrees, package smoke-test scripts, and PR-process notes are intentionally excluded from the install artifact.
 
 Run the package smoke test before release handoff:
 
@@ -57,7 +57,9 @@ Run the package smoke test before release handoff:
 npm run package:smoke
 ```
 
-The smoke test creates a real package tarball in a temporary directory, installs it into a temporary consumer project, verifies the `codex-archiver` bin, checks `--help` and `--version`, and verifies required runtime/docs files are present while private/test-only files are absent. Publishing to npm is not automated by this project yet.
+The smoke test creates a real package tarball in a temporary directory, installs it into a temporary consumer project, verifies the `codex-archiver` bin, checks `--help` and `--version`, starts the packaged `serve` command, and verifies required runtime/docs files are present while private/test-only files are absent. Publishing to npm is not automated by this project yet.
+
+See [docs/install-release.md](docs/install-release.md) for the release checklist and package artifact contract.
 
 ## CLI
 

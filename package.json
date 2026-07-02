@@ -26,7 +26,10 @@
   "files": [
     "dist/**/*.js",
     "!dist/*.test.js",
-    "docs/**/*.md",
+    "docs/install-release.md",
+    "docs/restore-planning.md",
+    "docs/search-index.md",
+    "docs/visibility-diagnostics.md",
     "web/**/*",
     "README.md",
     "LICENSE"
