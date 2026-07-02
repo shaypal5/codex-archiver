@@ -92,6 +92,7 @@ export interface VisibilityProbeReport {
   message: string;
   durationMs?: number;
   visibleCount?: number;
+  warnings?: string[];
 }
 
 export interface ThreadVisibilityRecord {

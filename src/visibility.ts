@@ -19,6 +19,28 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 2500;
 const APP_SERVER_PAGE_LIMIT = 100;
 const APP_SERVER_MAX_PAGES = 50;
+const APP_SERVER_RESPONSE_SEARCH_DEPTH = 6;
+const THREAD_ARRAY_KEYS = new Set([
+  "threads",
+  "threadList",
+  "thread_list",
+  "items",
+  "sessions",
+  "conversations",
+  "entries",
+  "nodes",
+]);
+const APP_SERVER_NESTED_KEYS = [
+  "result",
+  "payload",
+  "data",
+  "response",
+  "body",
+  "page",
+  "connection",
+  "thread",
+  "session",
+];
 
 interface IndexedRow {
   id: string;
@@ -35,6 +57,13 @@ interface ProbeUniverse {
   ids: Set<string>;
   searchableText: string;
   report: VisibilityProbeReport;
+}
+
+interface AppServerThreadListPage {
+  threadObjects: unknown[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  warnings: string[];
 }
 
 export interface VisibilityOptions {
@@ -297,8 +326,11 @@ async function runAppServerProbe(
   const deadline = startedAt + timeoutMs;
   const ids = new Set<string>();
   const textParts: string[] = [];
+  const warnings: string[] = [];
+  const seenCursors = new Set<string>();
   let cursor: string | null = null;
   let offset = 0;
+  let reachedPageLimit = true;
 
   try {
     for (let page = 0; page < APP_SERVER_MAX_PAGES; page += 1) {
@@ -307,15 +339,36 @@ async function runAppServerProbe(
         throw new TimeoutError("app-server pagination exceeded the configured timeout");
       }
       const pageResult = await fetchThreadListPage(appServerUrl, cursor, offset, remainingMs);
-      collectVisibleCandidates(pageResult.body, ids, textParts);
+      warnings.push(...pageResult.warnings.map((warning) => `page ${page + 1}: ${warning}`));
+      collectVisibleCandidates(pageResult.threadObjects, ids, textParts, warnings, page + 1);
       if (!pageResult.nextCursor && !pageResult.hasMore) {
+        reachedPageLimit = false;
         break;
+      }
+      if (pageResult.nextCursor && seenCursors.has(pageResult.nextCursor)) {
+        warnings.push(
+          `page ${page + 1}: repeated pagination cursor "${pageResult.nextCursor}"; stopped to avoid a loop.`,
+        );
+        reachedPageLimit = false;
+        break;
+      }
+      if (pageResult.nextCursor) {
+        seenCursors.add(pageResult.nextCursor);
       }
       cursor = pageResult.nextCursor;
-      offset += pageResult.count;
-      if (pageResult.count === 0) {
+      offset += pageResult.threadObjects.length;
+      if (pageResult.threadObjects.length === 0) {
+        warnings.push(
+          `page ${page + 1}: pagination indicated more results but no thread objects were found.`,
+        );
+        reachedPageLimit = false;
         break;
       }
+    }
+    if (reachedPageLimit) {
+      warnings.push(
+        `stopped after ${APP_SERVER_MAX_PAGES} app-server pages; results may be incomplete.`,
+      );
     }
 
     return {
@@ -324,13 +377,21 @@ async function runAppServerProbe(
       report: {
         name: "codex-app-server",
         status: "available",
-        message: `Codex app-server thread/list probe returned ${ids.size} candidate thread ids.`,
+        message: `Codex app-server thread/list probe returned ${ids.size} candidate thread ids${
+          warnings.length > 0 ? ` with ${warnings.length} warning(s)` : ""
+        }.`,
         durationMs: Date.now() - startedAt,
         visibleCount: ids.size,
+        ...(warnings.length > 0 ? { warnings } : {}),
       },
     };
   } catch (error) {
-    const status = isAbortError(error) || error instanceof TimeoutError ? "timeout" : "failed";
+    const status =
+      isAbortError(error) || error instanceof TimeoutError
+        ? "timeout"
+        : isFetchUnavailable(error)
+          ? "unavailable"
+          : "failed";
     return {
       ids: new Set(),
       searchableText: "",
@@ -349,7 +410,7 @@ async function fetchThreadListPage(
   cursor: string | null,
   offset: number,
   timeoutMs: number,
-): Promise<{ body: unknown; nextCursor: string | null; hasMore: boolean; count: number }> {
+): Promise<AppServerThreadListPage> {
   const endpoint = new URL("/thread/list", normalizeBaseUrl(appServerUrl));
   endpoint.searchParams.set("limit", String(APP_SERVER_PAGE_LIMIT));
   endpoint.searchParams.set("offset", String(offset));
@@ -373,57 +434,173 @@ async function fetchThreadListPage(
       throw new Error(`HTTP ${response.status} ${response.statusText}`);
     }
     const body = (await response.json()) as unknown;
-    return {
-      body,
-      nextCursor: firstStringAt(body, [
-        ["nextCursor"],
-        ["next_cursor"],
-        ["next"],
-        ["result", "nextCursor"],
-        ["result", "next_cursor"],
-      ]),
-      hasMore: firstBooleanAt(body, [
-        ["hasMore"],
-        ["has_more"],
-        ["result", "hasMore"],
-        ["result", "has_more"],
-      ]),
-      count: findThreadObjects(body).length,
-    };
+    return parseAppServerThreadListPage(body);
   } finally {
     clearTimeout(timeout);
   }
 }
 
-function collectVisibleCandidates(value: unknown, ids: Set<string>, textParts: string[]): void {
-  for (const thread of findThreadObjects(value)) {
-    for (const id of candidateIds(thread)) {
+function parseAppServerThreadListPage(value: unknown): AppServerThreadListPage {
+  const warnings: string[] = [];
+  const threadObjects = findThreadObjects(value, warnings);
+  if (threadObjects.length === 0) {
+    warnings.push("no recognizable thread object array was found in the response.");
+  }
+  return {
+    threadObjects,
+    nextCursor: firstStringAtDeep(value, [
+      "nextCursor",
+      "next_cursor",
+      "nextPageCursor",
+      "next_page_cursor",
+      "after",
+      "cursor",
+      "continuationToken",
+      "continuation_token",
+      "endCursor",
+      "end_cursor",
+    ]),
+    hasMore: firstBooleanAtDeep(value, [
+      "hasMore",
+      "has_more",
+      "more",
+      "hasNextPage",
+      "has_next_page",
+      "nextPage",
+      "next_page",
+    ]),
+    warnings,
+  };
+}
+
+function collectVisibleCandidates(
+  threadObjects: unknown[],
+  ids: Set<string>,
+  textParts: string[],
+  warnings: string[],
+  pageNumber: number,
+): void {
+  let malformedCount = 0;
+  for (const thread of threadObjects) {
+    const threadIds = threadIdsFromObject(thread);
+    if (threadIds.length === 0) {
+      malformedCount += 1;
+      continue;
+    }
+    for (const id of threadIds) {
       ids.add(id);
     }
     textParts.push(JSON.stringify(thread));
   }
+  if (malformedCount > 0) {
+    warnings.push(
+      `page ${pageNumber}: ignored ${malformedCount} thread-like item(s) without a plausible thread id.`,
+    );
+  }
 }
 
-function findThreadObjects(value: unknown): unknown[] {
-  if (Array.isArray(value)) {
-    return value;
+function findThreadObjects(value: unknown, warnings: string[]): unknown[] {
+  const visited = new Set<unknown>();
+  const arrays: unknown[][] = [];
+
+  function visit(current: unknown, depth: number, viaThreadKey: boolean): void {
+    if (depth > APP_SERVER_RESPONSE_SEARCH_DEPTH || current === null) {
+      return;
+    }
+    if (typeof current === "object") {
+      if (visited.has(current)) {
+        return;
+      }
+      visited.add(current);
+    }
+
+    if (Array.isArray(current)) {
+      const threadLikeItems = current.filter((item) => isThreadLikeObject(item, !viaThreadKey));
+      if (viaThreadKey || threadLikeItems.length > 0) {
+        const rejected = current.length - threadLikeItems.length;
+        if (rejected > 0) {
+          warnings.push(
+            `ignored ${rejected} item(s) in a thread list because they did not look like thread objects.`,
+          );
+        }
+        arrays.push(threadLikeItems);
+      }
+      return;
+    }
+
+    if (!isRecord(current)) {
+      return;
+    }
+
+    for (const [key, child] of Object.entries(current)) {
+      if (THREAD_ARRAY_KEYS.has(key)) {
+        visit(child, depth + 1, true);
+      }
+    }
+    for (const key of APP_SERVER_NESTED_KEYS) {
+      if (key in current && !THREAD_ARRAY_KEYS.has(key)) {
+        visit(current[key], depth + 1, false);
+      }
+    }
   }
+
+  visit(value, 0, false);
+  return arrays.flat();
+}
+
+function isThreadLikeObject(value: unknown, requireThreadSignal: boolean): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (!requireThreadSignal && threadIdsFromObject(value).length > 0) {
+    return true;
+  }
+  const explicitThreadId = firstStringAt(value, [
+    ["thread_id"],
+    ["threadId"],
+    ["session_id"],
+    ["sessionId"],
+    ["conversation_id"],
+    ["conversationId"],
+    ["payload", "thread_id"],
+    ["payload", "threadId"],
+    ["thread", "id"],
+    ["session", "id"],
+    ["conversation", "id"],
+  ]);
+  const descriptiveSignal = firstStringAt(value, [
+      ["title"],
+      ["cwd"],
+      ["workingDirectory"],
+      ["working_directory"],
+      ["projectPath"],
+      ["project_path"],
+      ["rolloutPath"],
+      ["rollout_path"],
+      ["updatedAt"],
+      ["updated_at"],
+  ]);
+  return Boolean(explicitThreadId || (firstStringAt(value, [["id"]]) && descriptiveSignal));
+}
+
+function threadIdsFromObject(value: unknown): string[] {
   if (!isRecord(value)) {
     return [];
   }
-  for (const key of ["threads", "items", "data", "sessions"]) {
-    const child = value[key];
-    if (Array.isArray(child)) {
-      return child;
-    }
-  }
-  for (const key of ["result", "payload"]) {
-    const nested = findThreadObjects(value[key]);
-    if (nested.length > 0) {
-      return nested;
-    }
-  }
-  return [];
+  const ids = [
+    firstStringAt(value, [
+      ["id"],
+      ["thread_id"],
+      ["threadId"],
+      ["session_id"],
+      ["sessionId"],
+      ["conversation_id"],
+      ["conversationId"],
+    ]),
+    firstStringAt(value, [["payload", "id"], ["payload", "thread_id"], ["payload", "threadId"]]),
+    firstStringAt(value, [["session", "id"], ["thread", "id"], ["conversation", "id"]]),
+  ].filter((item): item is string => typeof item === "string" && isPlausibleThreadId(item));
+  return [...new Set(ids)];
 }
 
 function buildVisibilitySummary(threads: ThreadVisibilityRecord[]): VisibilitySummary {
@@ -514,6 +691,95 @@ function firstBooleanAt(value: unknown, paths: string[][]): boolean {
   return false;
 }
 
+function firstStringAtDeep(value: unknown, keys: string[]): string | null {
+  const visited = new Set<unknown>();
+
+  function visit(current: unknown, depth: number): string | null {
+    if (depth > APP_SERVER_RESPONSE_SEARCH_DEPTH || current === null) {
+      return null;
+    }
+    if (typeof current === "object") {
+      if (visited.has(current)) {
+        return null;
+      }
+      visited.add(current);
+    }
+    if (Array.isArray(current)) {
+      return null;
+    }
+    if (!isRecord(current)) {
+      return null;
+    }
+    for (const key of keys) {
+      const child = current[key];
+      if (typeof child === "string" && child.trim()) {
+        return child.trim();
+      }
+    }
+    for (const key of [...APP_SERVER_NESTED_KEYS, "pagination", "pageInfo", "page_info", "meta"]) {
+      if (key in current) {
+        const nested = visit(current[key], depth + 1);
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+    return null;
+  }
+
+  return visit(value, 0);
+}
+
+function firstBooleanAtDeep(value: unknown, keys: string[]): boolean {
+  const visited = new Set<unknown>();
+
+  function visit(current: unknown, depth: number): boolean | null {
+    if (depth > APP_SERVER_RESPONSE_SEARCH_DEPTH || current === null) {
+      return null;
+    }
+    if (typeof current === "object") {
+      if (visited.has(current)) {
+        return null;
+      }
+      visited.add(current);
+    }
+    if (Array.isArray(current)) {
+      return null;
+    }
+    if (!isRecord(current)) {
+      return null;
+    }
+    for (const key of keys) {
+      const child = current[key];
+      if (typeof child === "boolean") {
+        return child;
+      }
+    }
+    for (const key of [...APP_SERVER_NESTED_KEYS, "pagination", "pageInfo", "page_info", "meta"]) {
+      if (key in current) {
+        const nested = visit(current[key], depth + 1);
+        if (nested !== null) {
+          return nested;
+        }
+      }
+    }
+    return null;
+  }
+
+  return visit(value, 0) ?? false;
+}
+
+function isPlausibleThreadId(value: string): boolean {
+  const trimmed = value.trim();
+  return (
+    trimmed.length >= 4 &&
+    trimmed.length <= 160 &&
+    !/\s/.test(trimmed) &&
+    !/[/?#{}[\]\\]/.test(trimmed) &&
+    !/^https?:/i.test(trimmed)
+  );
+}
+
 function idsFromText(text: string): Set<string> {
   const ids = new Set<string>();
   for (const match of text.matchAll(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32}/gi)) {
@@ -586,6 +852,22 @@ function isTimeoutError(error: unknown): boolean {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function isFetchUnavailable(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (error.name !== "TypeError" && !/fetch failed/i.test(error.message)) {
+    return false;
+  }
+  const cause = isRecord(error) ? error.cause : null;
+  return (
+    isRecord(cause) &&
+    ["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH", "ECONNRESET"].includes(
+      String(cause.code),
+    )
+  );
 }
 
 function isMissingCommand(error: unknown): boolean {

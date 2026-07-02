@@ -26,7 +26,11 @@ Each thread report keeps these states separate:
 
 `codex resume --all --include-non-interactive` runs with a timeout and plain terminal environment. Command-not-found, nonzero exits, and timeouts are recorded as probe diagnostics instead of failing the full report.
 
-The app-server probe is only attempted when `--app-server-url` or `CODEX_ARCHIVER_CODEX_APP_SERVER_URL` is set. It reads `/thread/list` pages with a small page limit and stops after a bounded number of pages. HTTP errors and timeouts are recorded as probe diagnostics.
+The app-server probe is only attempted when `--app-server-url` or `CODEX_ARCHIVER_CODEX_APP_SERVER_URL` is set. It reads `/thread/list` pages with a small page limit and stops after a bounded number of pages. HTTP errors, unavailable local servers, and timeouts are recorded as probe diagnostics.
+
+The app-server response parser is intentionally defensive because `/thread/list` is not treated as a stable public contract. It accepts thread arrays at the top level or under common envelope keys such as `threads`, `items`, `sessions`, `data`, `result`, and `payload`. It recognizes thread-id aliases such as `id`, `threadId`, `thread_id`, `sessionId`, `session_id`, `conversationId`, and nested `thread.id` / `session.id` fields, while ignoring malformed objects that do not have a plausible thread id. Cursor fields such as `nextCursor`, `next_cursor`, `nextPageCursor`, `continuationToken`, and `pageInfo.endCursor` are best-effort; repeated cursors, empty paginated pages, unknown shapes, and page-limit stops are reported in the probe `warnings` array and do not fail the full diagnostics run.
+
+The app-server probe only performs GET requests, with a POST fallback when the endpoint reports 404 or 405. It does not mutate `~/.codex`.
 
 ## API
 

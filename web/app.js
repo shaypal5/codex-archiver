@@ -140,6 +140,21 @@ function renderVisibility(data) {
       const message = document.createElement("span");
       message.textContent = probe.message;
       item.append(name, message);
+      if (Array.isArray(probe.warnings) && probe.warnings.length > 0) {
+        const warnings = document.createElement("ul");
+        warnings.className = "probe-warnings";
+        for (const warning of probe.warnings.slice(0, 5)) {
+          const warningItem = document.createElement("li");
+          warningItem.textContent = warning;
+          warnings.append(warningItem);
+        }
+        if (probe.warnings.length > 5) {
+          const warningItem = document.createElement("li");
+          warningItem.textContent = `${probe.warnings.length - 5} more warning(s) omitted.`;
+          warnings.append(warningItem);
+        }
+        item.append(warnings);
+      }
       return item;
     }),
   );

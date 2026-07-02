@@ -236,6 +236,11 @@ button:disabled {
   padding: 10px 12px;
 }
 
+.probe-warnings {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
 .table-wrap {
   background: white;
   border: 1px solid #dedfd8;

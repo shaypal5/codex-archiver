@@ -99,6 +99,7 @@ node dist/cli.js diagnose visibility --app-server-url http://127.0.0.1:PORT
 ```
 
 The app-server URL may also be set with `CODEX_ARCHIVER_CODEX_APP_SERVER_URL`.
+The app-server `/thread/list` parser accepts common `payload` / `data` / `result` envelopes, several thread-id aliases, and bounded cursor pagination. Shape mismatches, malformed thread objects, repeated cursors, page-limit stops, unavailable servers, and timeouts are reported as probe status or warnings instead of failing the full diagnostics report.
 
 ## CI
 
