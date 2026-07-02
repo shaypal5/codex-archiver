@@ -4,7 +4,7 @@ A local browser and restoration tool for old, archived, hidden, and hard-to-find
 
 ## Status
 
-Early scaffold. Browsing, scanning, diagnostics, indexing, and restore planning are read-only with respect to `~/.codex`. The intentionally mutating path is limited to `codex-archiver restore apply`, which currently supports only the narrow archived-SQLite restore subset after explicit confirmation, preflight, timestamped backups, and verification.
+Early scaffold. Browsing, scanning, diagnostics, indexing, restore planning, and restore undo preview are read-only with respect to `~/.codex`. The intentionally mutating paths are limited to `codex-archiver restore apply` and confirmation-gated `codex-archiver restore undo`, both after explicit artifact selection, preflight, backup validation, timestamped backups, machine-readable reports, and verification.
 
 ## Usage
 
@@ -125,7 +125,16 @@ node dist/cli.js restore apply THREAD_ID --confirm-token restore-...
 
 `restore apply` recomputes the plan immediately before mutation, requires the confirmation token or phrase from the plan, blocks on any non-passing preflight check, creates a timestamped backup root under `~/.cache/codex-archiver/backups`, writes a machine-readable report, then verifies by rescanning. M4 apply supports only archived SQLite threads with existing archived JSONL evidence. JSONL-only archived threads and UI-hidden active threads remain diagnostic-only.
 
-See [docs/restore-planning.md](docs/restore-planning.md) for the `M3-RESTORE-PLAN`, `M3-PREFLIGHT-BACKUP-PREVIEW`, and `M4-RESTORE-APPLY-BACKUPS` contracts, CLI/API details, and safety boundaries.
+Preview rollback from an apply backup/report artifact with:
+
+```bash
+node dist/cli.js restore undo --report /path/to/restore-report.json
+node dist/cli.js restore undo --backup-root /path/to/backup-root
+```
+
+The preview validates the report schema, backup manifest, backup file hashes/sizes, target paths, and Codex process preflight, then shows target restore/remove actions plus an undo confirmation token. Confirmed undo creates a fresh rollback-safety backup, restores backed files, removes apply-created active-session files recorded in the apply report, rebuilds the derived search index, writes a machine-readable undo report, and verifies by rescanning.
+
+See [docs/restore-planning.md](docs/restore-planning.md) for the `M3-RESTORE-PLAN`, `M3-PREFLIGHT-BACKUP-PREVIEW`, `M4-RESTORE-APPLY-BACKUPS`, and `M4-RESTORE-UNDO-BACKUPS` contracts, CLI/API details, and safety boundaries.
 
 ## CI
 
@@ -137,4 +146,4 @@ Pull requests run GitHub Actions CI with:
 
 ## Safety
 
-The only supported `~/.codex` mutation path is explicit restore apply. Do not run apply while Codex Desktop or related Codex processes are open. Keep the backup root and report until undo/restore-from-backup support lands in a later milestone.
+The only supported `~/.codex` mutation paths are explicit restore apply and explicit restore undo from an existing backup/report artifact. Do not run apply or confirmed undo while Codex Desktop or related Codex processes are open. Keep apply backup roots, apply reports, undo safety backups, and undo reports until the restored state is confirmed healthy.

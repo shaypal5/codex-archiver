@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -16,6 +16,10 @@ import type {
   RestoreApplyOptions,
   RestoreApplyReport,
   RestoreApplyResultStatus,
+  RestoreUndoReport,
+  RestoreUndoRestoredFile,
+  RestoreUndoSafetyBackup,
+  RestoreUndoTarget,
   RestorePlan,
   RestorePlanActionability,
   RestorePlanBackupPreview,
@@ -47,6 +51,18 @@ export interface RestoreApplyInternalOptions extends RestoreApplyOptions {
   processDetector?: CodexProcessDetector;
   now?: Date;
   sqlRunner?: (dbPath: string, sql: string) => Promise<void>;
+}
+
+export interface RestoreUndoInternalOptions {
+  codexHome?: string;
+  indexPath?: string;
+  reportPath?: string;
+  backupRoot?: string;
+  confirmationToken?: string;
+  confirmationPhrase?: string;
+  processCheckMode?: RestoreProcessCheckMode;
+  processDetector?: CodexProcessDetector;
+  now?: Date;
 }
 
 export interface CodexProcessDetection {
@@ -296,6 +312,198 @@ export async function applyRestorePlan(options: RestoreApplyInternalOptions): Pr
   return writeReport("succeeded", "Restore apply completed.");
 }
 
+export async function undoRestoreApply(options: RestoreUndoInternalOptions): Promise<RestoreUndoReport> {
+  const codexHome = path.resolve(expandHome(options.codexHome ?? defaultCodexHome()));
+  const indexPath = path.resolve(expandHome(options.indexPath ?? defaultIndexPath()));
+  const startedAt = (options.now ?? new Date()).toISOString();
+  const operationId = `restore-undo-${startedAt.replaceAll(/[:.]/g, "-")}`;
+  const resolvedInput = resolveUndoInput(options);
+  const reportPath = resolvedInput.reportPath;
+  const backupRoot = resolvedInput.backupRoot;
+  const safetyRoot = path.join(backupRoot, "rollback-safety", operationId);
+  const undoReportPath = path.join(safetyRoot, "restore-undo-report.json");
+  const restoredFiles: RestoreUndoRestoredFile[] = [];
+  let safetyBackup: RestoreUndoSafetyBackup | null = null;
+
+  let sourceReport: RestoreApplyReport | null = null;
+  let backupManifest: RestoreApplyBackupManifest | null = null;
+  let manifestPath = path.join(backupRoot, "backup-manifest.json");
+  let targets: RestoreUndoTarget[] = [];
+
+  const readErrors: string[] = [];
+  try {
+    sourceReport = readJsonFile<RestoreApplyReport>(reportPath);
+    manifestPath = path.resolve(sourceReport.backupManifest.manifestPath);
+    backupManifest = readJsonFile<RestoreApplyBackupManifest>(manifestPath);
+    targets = buildUndoTargets({ codexHome, indexPath, backupRoot, manifest: backupManifest, sourceReport });
+  } catch (error) {
+    readErrors.push(errorMessage(error));
+  }
+
+  const confirmationToken = confirmationTokenForUndo({
+    reportPath,
+    backupRoot,
+    operationId: sourceReport?.operationId ?? "unreadable",
+    targets,
+  });
+  const confirmationPhrase = `undo restore ${confirmationToken}`;
+  const preflight = await buildPreflight({
+    items: [],
+    processCheckMode: options.processCheckMode ?? "warn",
+    processDetector: options.processDetector ?? detectCodexProcesses,
+  });
+  const validation = buildUndoValidation({
+    codexHome,
+    indexPath,
+    reportPath,
+    backupRoot,
+    manifestPath,
+    sourceReport,
+    backupManifest,
+    targets,
+    readErrors,
+  });
+
+  function sourceApplyReportSummary(): RestoreUndoReport["sourceApplyReport"] {
+    return {
+      operationId: sourceReport?.operationId ?? "unreadable",
+      reportPath,
+      resultStatus: sourceReport?.result.status ?? "failed",
+      selectedThreadIds: sourceReport?.selectedThreadIds ?? [],
+    };
+  }
+
+  async function writeUndoReport(status: RestoreUndoReport["result"]["status"], message: string): Promise<RestoreUndoReport> {
+    const verification = status === "succeeded"
+      ? await verifyUndo({ codexHome, targets })
+      : {
+          status,
+          checkedAt: new Date().toISOString(),
+          restoredFiles: [],
+          failedFiles: status === "preview" ? [] : targets.map((target) => target.sourcePath),
+          diagnostics: [],
+          evidence: [message],
+        };
+    const finalStatus = status === "succeeded" && verification.status !== "succeeded" ? verification.status : status;
+    const report: RestoreUndoReport = {
+      schemaVersion: 1,
+      reportType: "restore-undo-report",
+      operationId,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      codexHome,
+      indexPath,
+      input: {
+        reportPath,
+        backupRoot,
+        manifestPath,
+      },
+      sourceApplyReport: sourceApplyReportSummary(),
+      readOnly: finalStatus === "preview" || finalStatus === "blocked",
+      mutationAllowed: finalStatus === "succeeded" || finalStatus === "failed",
+      confirmationToken,
+      confirmationPhrase,
+      preflight,
+      validation,
+      targets,
+      restoredFiles,
+      safetyBackup,
+      verification,
+      result: {
+        status: finalStatus,
+        message,
+        reportPath: finalStatus === "preview" || finalStatus === "blocked" ? undoReportPath : undoReportPath,
+        backupRoot,
+      },
+      nextUserSteps: nextUndoUserSteps(finalStatus, undoReportPath, safetyRoot),
+      limits: [
+        "M4 undo restores files that PR #7 apply backed up in backup-manifest.json.",
+        "Undo rejects backup/report path traversal, backup hash mismatches, and target paths outside the Codex home or configured search index.",
+        "Undo rebuilds the derived search index after restore, but it does not inspect Codex Desktop UI state directly.",
+      ],
+    };
+    if (finalStatus !== "preview" && (safetyBackup !== null || confirmationMatchesUndo(options, confirmationToken, confirmationPhrase))) {
+      await mkdir(path.dirname(undoReportPath), { recursive: true, mode: 0o700 });
+      await writeFile(undoReportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    }
+    return report;
+  }
+
+  if (!options.reportPath && !options.backupRoot) {
+    return writeUndoReport("blocked", "restore undo requires --report or --backup-root.");
+  }
+
+  if (hasBlockingChecks(validation)) {
+    return writeUndoReport("blocked", "Restore undo validation blocked mutation.");
+  }
+
+  if (!confirmationMatchesUndo(options, confirmationToken, confirmationPhrase)) {
+    return writeUndoReport(
+      "preview",
+      `Dry-run only. Re-run restore undo with --confirm-token ${confirmationToken} or --confirm-phrase "${confirmationPhrase}" to apply.`,
+    );
+  }
+
+  if (hasBlockingChecks(preflight)) {
+    return writeUndoReport("blocked", "Restore undo preflight blocked mutation.");
+  }
+
+  try {
+    safetyBackup = await createUndoSafetyBackup({
+      codexHome,
+      indexPath,
+      safetyRoot,
+      targets,
+      startedAt,
+    });
+
+    for (const target of targets) {
+      if (target.action === "skip-missing-original") {
+        restoredFiles.push({
+          sourcePath: target.sourcePath,
+          backupPath: target.backupPath,
+          safetyBackupPath: null,
+          status: "skipped",
+          message: "Manifest target did not exist when apply ran, so undo leaves it absent.",
+        });
+        continue;
+      }
+      if (target.action === "remove-created-file") {
+        await rm(target.sourcePath, { force: true });
+        restoredFiles.push({
+          sourcePath: target.sourcePath,
+          backupPath: target.backupPath,
+          safetyBackupPath: safetyBackup.targets.find((backup) => backup.sourcePath === target.sourcePath)?.backupPath ?? null,
+          status: "restored",
+          message: "Removed apply-created target after taking rollback safety backup.",
+        });
+        continue;
+      }
+      await restoreFromBackupTarget(target);
+      restoredFiles.push({
+        sourcePath: target.sourcePath,
+        backupPath: target.backupPath,
+        safetyBackupPath: safetyBackup.targets.find((backup) => backup.sourcePath === target.sourcePath)?.backupPath ?? null,
+        status: "restored",
+        message: "Restored backup file with temporary sibling copy and atomic rename.",
+      });
+    }
+
+    await rebuildSearchIndex({ codexHome, indexPath });
+  } catch (error) {
+    restoredFiles.push({
+      sourcePath: "restore-undo",
+      backupPath: backupRoot,
+      safetyBackupPath: safetyRoot,
+      status: "failed",
+      message: errorMessage(error),
+    });
+    return writeUndoReport("failed", `Restore undo failed after creating safety backup: ${errorMessage(error)}`);
+  }
+
+  return writeUndoReport("succeeded", "Restore undo completed, safety-backed rollback restored files, and verification passed.");
+}
+
 async function buildPreflight(input: {
   items: RestorePlanItem[];
   processCheckMode: RestoreProcessCheckMode;
@@ -320,6 +528,332 @@ async function buildPreflight(input: {
       hasWarnings: checks.some((check) => check.status === "warning"),
     },
   };
+}
+
+function resolveUndoInput(options: RestoreUndoInternalOptions): { reportPath: string; backupRoot: string } {
+  const explicitReportPath = options.reportPath ? path.resolve(expandHome(options.reportPath)) : null;
+  const explicitBackupRoot = options.backupRoot ? path.resolve(expandHome(options.backupRoot)) : null;
+  if (explicitReportPath && explicitBackupRoot) {
+    return { reportPath: explicitReportPath, backupRoot: explicitBackupRoot };
+  }
+  if (explicitReportPath) {
+    return { reportPath: explicitReportPath, backupRoot: path.dirname(explicitReportPath) };
+  }
+  if (explicitBackupRoot) {
+    return { reportPath: path.join(explicitBackupRoot, "restore-report.json"), backupRoot: explicitBackupRoot };
+  }
+  return {
+    reportPath: path.resolve("restore-report.json"),
+    backupRoot: path.resolve("."),
+  };
+}
+
+function readJsonFile<T>(filePath: string): T {
+  return JSON.parse(readFileSync(filePath, "utf8")) as T;
+}
+
+function buildUndoTargets(input: {
+  codexHome: string;
+  indexPath: string;
+  backupRoot: string;
+  manifest: RestoreApplyBackupManifest;
+  sourceReport: RestoreApplyReport;
+}): RestoreUndoTarget[] {
+  const targets: RestoreUndoTarget[] = input.manifest.targets.map((target): RestoreUndoTarget => {
+    const backupMetadata = fileMetadata(target.backupPath);
+    const currentMetadata = fileMetadata(target.sourcePath);
+    const warnings: string[] = [];
+    const errors: string[] = [];
+    if (target.exists && !backupMetadata.exists) {
+      errors.push(`Backup file is missing: ${target.backupPath}`);
+    }
+    if (target.exists && target.sizeBytes !== null && backupMetadata.sizeBytes !== target.sizeBytes) {
+      errors.push(`Backup size mismatch for ${target.backupPath}: expected ${target.sizeBytes}, found ${backupMetadata.sizeBytes}.`);
+    }
+    if (target.exists && target.hashStatus === "sha256" && target.sha256 !== backupMetadata.sha256) {
+      errors.push(`Backup sha256 mismatch for ${target.backupPath}.`);
+    }
+    if (target.exists && currentMetadata.exists && currentMetadata.sha256 === backupMetadata.sha256) {
+      warnings.push("Current target already matches the backup artifact.");
+    }
+    if (target.exists && currentMetadata.exists && currentMetadata.sha256 !== backupMetadata.sha256) {
+      warnings.push("Current target differs from the backup artifact and will be overwritten if confirmed.");
+    }
+    return {
+      sourcePath: path.resolve(target.sourcePath),
+      backupPath: path.resolve(target.backupPath),
+      kind: target.kind,
+      existsInManifest: target.exists,
+      backupExists: backupMetadata.exists,
+      targetExists: currentMetadata.exists,
+      backupSizeBytes: backupMetadata.sizeBytes,
+      backupSha256: backupMetadata.sha256,
+      currentSizeBytes: currentMetadata.sizeBytes,
+      currentSha256: currentMetadata.sha256,
+      hashStatus: target.hashStatus,
+      action: target.exists ? "restore-file" : "skip-missing-original",
+      warnings,
+      errors,
+    };
+  });
+  const bySource = new Set(targets.map((target) => target.sourcePath));
+  for (const mutation of input.sourceReport.mutations) {
+    if (
+      mutation.kind !== "copy-rollout-to-active-session" ||
+      mutation.status !== "applied" ||
+      bySource.has(path.resolve(mutation.targetPath))
+    ) {
+      continue;
+    }
+    const metadata = fileMetadata(mutation.targetPath);
+    targets.push({
+      sourcePath: path.resolve(mutation.targetPath),
+      backupPath: "",
+      kind: "active-session-target",
+      existsInManifest: false,
+      backupExists: false,
+      targetExists: metadata.exists,
+      backupSizeBytes: null,
+      backupSha256: null,
+      currentSizeBytes: metadata.sizeBytes,
+      currentSha256: metadata.sha256,
+      hashStatus: "missing",
+      action: "remove-created-file",
+      warnings: metadata.exists
+        ? ["Apply created this active-session target and undo will remove it after taking a safety backup."]
+        : ["Apply-created active-session target is already absent."],
+      errors: [],
+    });
+  }
+  return targets;
+}
+
+function buildUndoValidation(input: {
+  codexHome: string;
+  indexPath: string;
+  reportPath: string;
+  backupRoot: string;
+  manifestPath: string;
+  sourceReport: RestoreApplyReport | null;
+  backupManifest: RestoreApplyBackupManifest | null;
+  targets: RestoreUndoTarget[];
+  readErrors: string[];
+}): RestorePlanPreflight {
+  const checks: RestorePlanPreflightCheck[] = [
+    undoReportSchemaCheck(input.backupRoot, input.sourceReport, input.readErrors),
+    undoManifestSchemaCheck(input.backupRoot, input.manifestPath, input.backupManifest, input.readErrors),
+    undoManifestPathCheck(input.backupRoot, input.backupManifest, input.targets),
+    undoTargetPathCheck(input.codexHome, input.indexPath, input.targets),
+    undoBackupIntegrityCheck(input.targets),
+  ];
+  return {
+    processCheckMode: "warn",
+    checks,
+    summary: {
+      passed: countStatus(checks, "passed"),
+      warning: countStatus(checks, "warning"),
+      failed: countStatus(checks, "failed"),
+      unknown: countStatus(checks, "unknown"),
+      hasFailures: checks.some((check) => check.status === "failed"),
+      hasWarnings: checks.some((check) => check.status === "warning"),
+    },
+  };
+}
+
+function undoReportSchemaCheck(
+  backupRoot: string,
+  sourceReport: RestoreApplyReport | null,
+  readErrors: string[],
+): RestorePlanPreflightCheck {
+  if (!sourceReport) {
+    return failedUndoCheck(
+      "undo-report-schema",
+      "Apply report schema",
+      readErrors.length > 0 ? readErrors : ["Restore apply report could not be read."],
+      "Pass --report pointing at a PR #7 restore-report.json artifact.",
+    );
+  }
+  if (sourceReport.schemaVersion !== 1 || sourceReport.reportType !== "restore-apply-report") {
+    return failedUndoCheck(
+      "undo-report-schema",
+      "Apply report schema",
+      [`Unsupported report schemaVersion/reportType: ${String(sourceReport.schemaVersion)} ${String(sourceReport.reportType)}.`],
+      "Use a schemaVersion 1 restore-apply-report produced by restore apply.",
+    );
+  }
+  const rootErrors = [
+    sourceReport.result.backupRoot,
+    sourceReport.backupManifest.backupRoot,
+  ]
+    .filter((candidate) => path.resolve(candidate) !== path.resolve(backupRoot))
+    .map((candidate) => `Source apply report references backup root ${candidate}, not requested root ${backupRoot}.`);
+  if (rootErrors.length > 0) {
+    return failedUndoCheck(
+      "undo-report-schema",
+      "Apply report schema",
+      rootErrors,
+      "Use the report with its original backup root, or pass --backup-root matching the apply report artifact.",
+    );
+  }
+  return passedUndoCheck(
+    "undo-report-schema",
+    "Apply report schema",
+    [`Report ${sourceReport.operationId} uses recognized schemaVersion 1 restore-apply-report.`],
+  );
+}
+
+function undoManifestSchemaCheck(
+  backupRoot: string,
+  manifestPath: string,
+  manifest: RestoreApplyBackupManifest | null,
+  readErrors: string[],
+): RestorePlanPreflightCheck {
+  if (!manifest) {
+    return failedUndoCheck(
+      "undo-manifest-schema",
+      "Backup manifest schema",
+      readErrors.length > 0 ? readErrors : ["Backup manifest could not be read."],
+      "Keep backup-manifest.json next to the restore report or pass the correct --backup-root.",
+    );
+  }
+  if (path.resolve(manifest.backupRoot) !== path.resolve(backupRoot)) {
+    return failedUndoCheck(
+      "undo-manifest-schema",
+      "Backup manifest schema",
+      [`Manifest backupRoot ${manifest.backupRoot} does not match requested backup root ${backupRoot}.`],
+      "Use the original backup root from the restore apply report.",
+    );
+  }
+  if (path.resolve(manifest.manifestPath) !== path.resolve(manifestPath)) {
+    return failedUndoCheck(
+      "undo-manifest-schema",
+      "Backup manifest schema",
+      [`Manifest path ${manifest.manifestPath} does not match resolved manifest path ${manifestPath}.`],
+      "Use the unmodified backup manifest from the restore apply artifact.",
+    );
+  }
+  if (!Array.isArray(manifest.targets)) {
+    return failedUndoCheck(
+      "undo-manifest-schema",
+      "Backup manifest schema",
+      ["Manifest targets must be an array."],
+      "Use an intact backup-manifest.json produced by restore apply.",
+    );
+  }
+  return passedUndoCheck(
+    "undo-manifest-schema",
+    "Backup manifest schema",
+    [`Manifest includes ${manifest.targets.length} target(s).`],
+  );
+}
+
+function undoManifestPathCheck(
+  backupRoot: string,
+  manifest: RestoreApplyBackupManifest | null,
+  targets: RestoreUndoTarget[],
+): RestorePlanPreflightCheck {
+  if (!manifest) {
+    return failedUndoCheck("undo-manifest-paths", "Backup manifest paths", ["Manifest was unavailable."], "Use a valid backup manifest.");
+  }
+  const evidence: string[] = [];
+  const errors: string[] = [];
+  for (const target of targets) {
+    if (target.action === "remove-created-file") {
+      evidence.push(`${target.sourcePath}: apply-created file is tracked from restore report mutation.`);
+      continue;
+    }
+    if (!pathInside(backupRoot, target.backupPath)) {
+      errors.push(`${target.backupPath} escapes backup root ${backupRoot}.`);
+    } else if (target.action === "restore-file" && !backupPathDoesNotEscape(backupRoot, target.backupPath)) {
+      errors.push(`${target.backupPath} resolves through a symlink or realpath outside backup root ${backupRoot}.`);
+    } else {
+      evidence.push(`${target.backupPath}: inside backup root.`);
+    }
+  }
+  if (!pathInside(backupRoot, manifest.manifestPath)) {
+    errors.push(`${manifest.manifestPath} escapes backup root ${backupRoot}.`);
+  }
+  if (errors.length > 0) {
+    return failedUndoCheck(
+      "undo-manifest-paths",
+      "Backup manifest paths",
+      errors,
+      "Reject modified manifests whose backup paths leave the selected backup root.",
+    );
+  }
+  return passedUndoCheck("undo-manifest-paths", "Backup manifest paths", evidence.length > 0 ? evidence : ["No backup targets to restore."]);
+}
+
+function undoTargetPathCheck(codexHome: string, indexPath: string, targets: RestoreUndoTarget[]): RestorePlanPreflightCheck {
+  const evidence: string[] = [];
+  const errors: string[] = [];
+  for (const target of targets) {
+    const allowed = pathInside(codexHome, target.sourcePath) || path.resolve(target.sourcePath) === path.resolve(indexPath);
+    if (!allowed) {
+      errors.push(`${target.sourcePath} is outside Codex home ${codexHome} and is not the configured search index ${indexPath}.`);
+      continue;
+    }
+    const safe = targetPathDoesNotEscape(codexHome, indexPath, target.sourcePath);
+    if (!safe) {
+      errors.push(`${target.sourcePath} resolves through a symlink or parent escape outside its allowed root.`);
+      continue;
+    }
+    evidence.push(`${target.sourcePath}: target path is inside the allowed restore root.`);
+  }
+  if (errors.length > 0) {
+    return failedUndoCheck(
+      "undo-target-paths",
+      "Target restore paths",
+      errors,
+      "Use only unmodified restore reports whose targets are under the intended Codex home or configured search index.",
+    );
+  }
+  return passedUndoCheck("undo-target-paths", "Target restore paths", evidence.length > 0 ? evidence : ["No target paths to restore."]);
+}
+
+function undoBackupIntegrityCheck(targets: RestoreUndoTarget[]): RestorePlanPreflightCheck {
+  const errors = targets.flatMap((target) => target.errors);
+  const warnings = targets.flatMap((target) => target.warnings);
+  if (errors.length > 0) {
+    return failedUndoCheck("undo-backup-integrity", "Backup file integrity", errors, "Use an intact backup root with unchanged backup files.");
+  }
+  if (warnings.length > 0) {
+    return {
+      id: "undo-backup-integrity",
+      label: "Backup file integrity",
+      status: "passed",
+      blocking: false,
+      evidence: warnings,
+      remediation: "Review target differences before confirming undo.",
+    };
+  }
+  return passedUndoCheck("undo-backup-integrity", "Backup file integrity", ["All backup files exist and match recorded size/hash metadata."]);
+}
+
+function passedUndoCheck(id: string, label: string, evidence: string[]): RestorePlanPreflightCheck {
+  return {
+    id,
+    label,
+    status: "passed",
+    blocking: false,
+    evidence,
+    remediation: "No action needed.",
+  };
+}
+
+function failedUndoCheck(id: string, label: string, evidence: string[], remediation: string): RestorePlanPreflightCheck {
+  return {
+    id,
+    label,
+    status: "failed",
+    blocking: true,
+    evidence,
+    remediation,
+  };
+}
+
+function hasBlockingChecks(preflight: RestorePlanPreflight): boolean {
+  return preflight.checks.some((check) => check.status !== "passed" || check.blocking);
 }
 
 function selectedIdsCheck(items: RestorePlanItem[]): RestorePlanPreflightCheck {
@@ -870,6 +1404,84 @@ function pathExists(filePath: string): boolean {
   return existsSync(filePath);
 }
 
+function pathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function targetPathDoesNotEscape(codexHome: string, indexPath: string, candidate: string): boolean {
+  const absolute = path.resolve(candidate);
+  const allowedRoot = absolute === path.resolve(indexPath) ? path.dirname(indexPath) : codexHome;
+  if (!pathInside(allowedRoot, absolute)) {
+    return false;
+  }
+  try {
+    if (!existsSync(allowedRoot)) {
+      const anchor = nearestExistingParent(allowedRoot);
+      return pathInside(anchor, allowedRoot) &&
+        pathInside(anchor, absolute) &&
+        !pathHasSymlinkAncestor(anchor, absolute);
+    }
+    const realAllowedRoot = realpathSync(allowedRoot);
+    if (existsSync(absolute)) {
+      if (lstatSync(absolute).isSymbolicLink()) {
+        return false;
+      }
+      return pathInside(realAllowedRoot, realpathSync(absolute));
+    }
+    const parent = nearestExistingParent(absolute);
+    return pathInside(realAllowedRoot, realpathSync(parent)) && !pathHasSymlinkAncestor(allowedRoot, absolute);
+  } catch {
+    return false;
+  }
+}
+
+function backupPathDoesNotEscape(backupRoot: string, candidate: string): boolean {
+  const absolute = path.resolve(candidate);
+  if (!pathInside(backupRoot, absolute)) {
+    return false;
+  }
+  try {
+    if (!existsSync(absolute)) {
+      return true;
+    }
+    if (lstatSync(absolute).isSymbolicLink()) {
+      return false;
+    }
+    return pathInside(realpathSync(backupRoot), realpathSync(absolute));
+  } catch {
+    return false;
+  }
+}
+
+function nearestExistingParent(filePath: string): string {
+  let current = path.dirname(filePath);
+  while (!existsSync(current)) {
+    const next = path.dirname(current);
+    if (next === current) {
+      return current;
+    }
+    current = next;
+  }
+  return current;
+}
+
+function pathHasSymlinkAncestor(root: string, filePath: string): boolean {
+  const resolvedRoot = path.resolve(root);
+  let current = path.resolve(filePath);
+  while (pathInside(resolvedRoot, current) && current !== resolvedRoot) {
+    if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
+      return true;
+    }
+    const next = path.dirname(current);
+    if (next === current) {
+      break;
+    }
+    current = next;
+  }
+  return false;
+}
+
 function fileMetadata(filePath: string): {
   exists: boolean;
   sizeBytes: number | null;
@@ -1266,6 +1878,158 @@ async function verifyApply(input: {
     diagnostics: scan.diagnostics,
     evidence,
   };
+}
+
+async function createUndoSafetyBackup(input: {
+  codexHome: string;
+  indexPath: string;
+  safetyRoot: string;
+  targets: RestoreUndoTarget[];
+  startedAt: string;
+}): Promise<RestoreUndoSafetyBackup> {
+  await mkdir(input.safetyRoot, { recursive: true, mode: 0o700 });
+  const targets: RestorePlanBackupTarget[] = [];
+  for (const target of input.targets) {
+    const safetyPath = path.join(
+      input.safetyRoot,
+      backupRelativePath(input.codexHome, input.indexPath, target.sourcePath),
+    );
+    const metadata = fileMetadata(target.sourcePath);
+    if (metadata.exists) {
+      await mkdir(path.dirname(safetyPath), { recursive: true, mode: 0o700 });
+      await cp(target.sourcePath, safetyPath, { preserveTimestamps: true });
+    }
+    targets.push({
+      sourcePath: target.sourcePath,
+      backupPath: safetyPath,
+      kind: target.kind,
+      exists: metadata.exists,
+      sizeBytes: metadata.sizeBytes,
+      mtimeMs: metadata.mtimeMs,
+      sha256: metadata.sha256,
+      hashStatus: metadata.hashStatus,
+      requiredBeforeApply: true,
+    });
+  }
+
+  const manifest: RestoreUndoSafetyBackup = {
+    backupRoot: input.safetyRoot,
+    manifestPath: path.join(input.safetyRoot, "rollback-safety-manifest.json"),
+    createdAt: input.startedAt,
+    targets,
+  };
+  await writeFile(manifest.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  return manifest;
+}
+
+async function restoreFromBackupTarget(target: RestoreUndoTarget): Promise<void> {
+  const tmpPath = tempSiblingPath(target.sourcePath);
+  try {
+    await mkdir(path.dirname(target.sourcePath), { recursive: true, mode: 0o700 });
+    await cp(target.backupPath, tmpPath, { preserveTimestamps: true });
+    await rename(tmpPath, target.sourcePath);
+  } catch (error) {
+    await rm(tmpPath, { force: true });
+    throw error;
+  }
+}
+
+async function verifyUndo(input: {
+  codexHome: string;
+  targets: RestoreUndoTarget[];
+}): Promise<RestoreUndoReport["verification"]> {
+  const restoredFiles: string[] = [];
+  const failedFiles: string[] = [];
+  const evidence: string[] = [];
+  for (const target of input.targets) {
+    if (target.action === "skip-missing-original") {
+      restoredFiles.push(target.sourcePath);
+      evidence.push(`${target.sourcePath}: skipped because original manifest entry was missing.`);
+      continue;
+    }
+    if (target.action === "remove-created-file") {
+      if (!existsSync(target.sourcePath)) {
+        restoredFiles.push(target.sourcePath);
+        evidence.push(`${target.sourcePath}: apply-created file was removed.`);
+      } else {
+        failedFiles.push(target.sourcePath);
+        evidence.push(`${target.sourcePath}: apply-created file still exists after undo.`);
+      }
+      continue;
+    }
+    const restoredMetadata = fileMetadata(target.sourcePath);
+    const backupMetadata = fileMetadata(target.backupPath);
+    if (
+      restoredMetadata.exists &&
+      restoredMetadata.sizeBytes === backupMetadata.sizeBytes &&
+      (target.hashStatus !== "sha256" || restoredMetadata.sha256 === backupMetadata.sha256)
+    ) {
+      restoredFiles.push(target.sourcePath);
+      evidence.push(`${target.sourcePath}: restored file matches backup artifact.`);
+    } else {
+      failedFiles.push(target.sourcePath);
+      evidence.push(`${target.sourcePath}: restored file does not match backup artifact.`);
+    }
+  }
+  const scan = await scanCodexStorage(input.codexHome);
+  return {
+    status: failedFiles.length === 0 ? "succeeded" : "failed",
+    checkedAt: new Date().toISOString(),
+    restoredFiles,
+    failedFiles,
+    diagnostics: scan.diagnostics,
+    evidence,
+  };
+}
+
+function nextUndoUserSteps(status: RestoreUndoReport["result"]["status"], reportPath: string, safetyRoot: string): string[] {
+  if (status === "preview") {
+    return [
+      "Review the undo targets, conflicts, blockers, and confirmation phrase before applying rollback.",
+      "Run restore undo again with the shown confirmation token or phrase only if these targets are correct.",
+    ];
+  }
+  if (status === "succeeded") {
+    return [
+      `Review the undo report at ${reportPath}.`,
+      `Keep rollback safety backup ${safetyRoot} until Codex state is confirmed healthy.`,
+      "Reopen Codex Desktop only after confirming undo verification succeeded.",
+    ];
+  }
+  return [
+    `Inspect the undo report or preview at ${reportPath}.`,
+    `If a safety backup exists, keep ${safetyRoot} for manual recovery.`,
+    "Do not reopen Codex Desktop as if undo succeeded until verification is clean.",
+  ];
+}
+
+function confirmationTokenForUndo(input: {
+  reportPath: string;
+  backupRoot: string;
+  operationId: string;
+  targets: RestoreUndoTarget[];
+}): string {
+  const stable = {
+    reportPath: input.reportPath,
+    backupRoot: input.backupRoot,
+    operationId: input.operationId,
+    targets: input.targets.map((target) => ({
+      sourcePath: target.sourcePath,
+      backupPath: target.backupPath,
+      backupSha256: target.backupSha256,
+      backupSizeBytes: target.backupSizeBytes,
+      action: target.action,
+    })),
+  };
+  return `undo-${createHash("sha256").update(JSON.stringify(stable)).digest("hex").slice(0, 16)}`;
+}
+
+function confirmationMatchesUndo(
+  options: RestoreUndoInternalOptions,
+  expectedToken: string,
+  expectedPhrase: string,
+): boolean {
+  return options.confirmationToken === expectedToken || options.confirmationPhrase === expectedPhrase;
 }
 
 function nextUserSteps(status: RestoreApplyResultStatus, reportPath: string, backupRoot: string): string[] {

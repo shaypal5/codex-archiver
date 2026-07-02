@@ -381,3 +381,99 @@ export interface RestoreApplyReport {
   nextUserSteps: string[];
   limits: string[];
 }
+
+export type RestoreUndoResultStatus =
+  | "preview"
+  | "succeeded"
+  | "blocked"
+  | "failed";
+
+export interface RestoreUndoOptions {
+  codexHome?: string;
+  indexPath?: string;
+  reportPath?: string;
+  backupRoot?: string;
+  confirmationToken?: string;
+  confirmationPhrase?: string;
+  processCheckMode?: RestoreProcessCheckMode;
+}
+
+export interface RestoreUndoTarget {
+  sourcePath: string;
+  backupPath: string;
+  kind: RestorePlanBackupTarget["kind"];
+  existsInManifest: boolean;
+  backupExists: boolean;
+  targetExists: boolean;
+  backupSizeBytes: number | null;
+  backupSha256: string | null;
+  currentSizeBytes: number | null;
+  currentSha256: string | null;
+  hashStatus: RestorePlanBackupTarget["hashStatus"];
+  action: "restore-file" | "remove-created-file" | "skip-missing-original";
+  warnings: string[];
+  errors: string[];
+}
+
+export interface RestoreUndoSafetyBackup {
+  backupRoot: string;
+  manifestPath: string;
+  createdAt: string;
+  targets: RestorePlanBackupTarget[];
+}
+
+export interface RestoreUndoRestoredFile {
+  sourcePath: string;
+  backupPath: string;
+  safetyBackupPath: string | null;
+  status: "restored" | "skipped" | "failed";
+  message: string;
+}
+
+export interface RestoreUndoVerification {
+  status: RestoreUndoResultStatus;
+  checkedAt: string;
+  restoredFiles: string[];
+  failedFiles: string[];
+  diagnostics: Diagnostic[];
+  evidence: string[];
+}
+
+export interface RestoreUndoReport {
+  schemaVersion: 1;
+  reportType: "restore-undo-report";
+  operationId: string;
+  startedAt: string;
+  completedAt: string;
+  codexHome: string;
+  indexPath: string;
+  input: {
+    reportPath: string;
+    backupRoot: string;
+    manifestPath: string;
+  };
+  sourceApplyReport: {
+    operationId: string;
+    reportPath: string;
+    resultStatus: RestoreApplyResultStatus;
+    selectedThreadIds: string[];
+  };
+  readOnly: boolean;
+  mutationAllowed: boolean;
+  confirmationToken: string;
+  confirmationPhrase: string;
+  preflight: RestorePlanPreflight;
+  validation: RestorePlanPreflight;
+  targets: RestoreUndoTarget[];
+  restoredFiles: RestoreUndoRestoredFile[];
+  safetyBackup: RestoreUndoSafetyBackup | null;
+  verification: RestoreUndoVerification;
+  result: {
+    status: RestoreUndoResultStatus;
+    message: string;
+    reportPath: string;
+    backupRoot: string;
+  };
+  nextUserSteps: string[];
+  limits: string[];
+}

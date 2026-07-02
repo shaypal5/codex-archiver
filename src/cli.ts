@@ -6,7 +6,7 @@ import {
   searchThreads,
 } from "./indexer.js";
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
-import { applyRestorePlan, createRestorePlan } from "./restore.js";
+import { applyRestorePlan, createRestorePlan, undoRestoreApply } from "./restore.js";
 import { scanCodexStorage } from "./scanner.js";
 import { serve } from "./server.js";
 import { diagnoseVisibility } from "./visibility.js";
@@ -158,6 +158,30 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (action === "undo") {
+      const reportPath = stringFlag(args, "report") ?? stringFlag(args, "report-path") ?? undefined;
+      const backupRoot = stringFlag(args, "backup-root") ?? undefined;
+      if (!reportPath && !backupRoot) {
+        throw new UsageError("restore undo requires --report /path/to/restore-report.json or --backup-root /path/to/backup-root.");
+      }
+      console.log(
+        JSON.stringify(
+          await undoRestoreApply({
+            codexHome,
+            indexPath,
+            reportPath,
+            backupRoot,
+            processCheckMode: parseProcessCheckMode(args),
+            confirmationToken: stringFlag(args, "confirm-token") ?? undefined,
+            confirmationPhrase: stringFlag(args, "confirm-phrase") ?? undefined,
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
     console.error(`Unknown restore action: ${action}`);
     printHelp();
     process.exit(1);
@@ -255,6 +279,8 @@ Usage:
   codex-archiver diagnose visibility [--timeout-ms 2500] [--no-codex-resume] [--app-server-url http://127.0.0.1:PORT]
   codex-archiver restore plan THREAD_ID... [--ids id-a,id-b] [--codex-home ~/.codex] [--index-path ~/.cache/codex-archiver/index.sqlite] [--process-check warn|strict|skip] [--skip-process-check] [--json]
   codex-archiver restore apply THREAD_ID... [--ids id-a,id-b] [--confirm-token restore-...] [--confirm-phrase "apply restore restore-..."]
+  codex-archiver restore undo --report /path/to/restore-report.json [--confirm-token undo-...] [--confirm-phrase "undo restore undo-..."]
+  codex-archiver restore undo --backup-root /path/to/backup-root [--confirm-token undo-...]
 
 Commands:
   serve   Start the local read-only browser.
