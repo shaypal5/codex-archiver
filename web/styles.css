@@ -118,6 +118,67 @@ select {
   margin-bottom: 16px;
 }
 
+.visibility-panel {
+  background: white;
+  border: 1px solid #dedfd8;
+  border-radius: 8px;
+  margin-bottom: 18px;
+  padding: 16px;
+}
+
+.section-title {
+  align-items: end;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+h2 {
+  font-size: 18px;
+  line-height: 1.25;
+  margin: 0 0 4px;
+}
+
+#visibility-meta {
+  color: #686b63;
+  font-size: 13px;
+}
+
+.visibility-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.visibility-metric {
+  background: #f7f7f4;
+  border: 1px solid #e3e4de;
+  border-radius: 6px;
+  min-height: 72px;
+  padding: 10px;
+}
+
+.visibility-metric span {
+  color: #686b63;
+  display: block;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.visibility-metric strong {
+  display: block;
+  font-size: 21px;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.probe-list {
+  display: grid;
+  gap: 8px;
+}
+
 .results-bar {
   align-items: center;
   display: flex;
@@ -147,19 +208,32 @@ button:disabled {
   padding: 10px 12px;
 }
 
-.diagnostic.info {
+.diagnostic.info,
+.probe.available {
   background: #edf4f2;
   color: #28584e;
 }
 
-.diagnostic.warning {
+.diagnostic.warning,
+.probe.skipped,
+.probe.unavailable,
+.probe.timeout {
   background: #fff4d8;
   color: #76530c;
 }
 
-.diagnostic.error {
+.diagnostic.error,
+.probe.failed {
   background: #ffe7e0;
   color: #8a2b17;
+}
+
+.probe {
+  border-radius: 6px;
+  display: grid;
+  font-size: 13px;
+  gap: 3px;
+  padding: 10px 12px;
 }
 
 .table-wrap {
@@ -256,10 +330,13 @@ td {
 
   .badges,
   .filters,
+  .section-title,
+  .visibility-grid,
   .results-bar {
     grid-template-columns: 1fr;
   }
 
+  .section-title,
   .results-bar {
     align-items: stretch;
     display: grid;

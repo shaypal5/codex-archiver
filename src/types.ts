@@ -72,3 +72,64 @@ export interface SearchIndexMeta {
   stats: ScanStats;
   diagnostics: Diagnostic[];
 }
+
+export type VisibilityProbeName =
+  | "session-index"
+  | "search-index"
+  | "codex-resume"
+  | "codex-app-server";
+
+export type VisibilityProbeStatus =
+  | "available"
+  | "unavailable"
+  | "failed"
+  | "timeout"
+  | "skipped";
+
+export interface VisibilityProbeReport {
+  name: VisibilityProbeName;
+  status: VisibilityProbeStatus;
+  message: string;
+  durationMs?: number;
+  visibleCount?: number;
+}
+
+export interface ThreadVisibilityRecord {
+  id: string;
+  title: string | null;
+  cwd: string | null;
+  updatedAt: number | null;
+  restoreStatus: RestoreStatus;
+  activeInLocalStorage: boolean;
+  archivedInLocalStorage: boolean;
+  rolloutFileExists: boolean;
+  rolloutFileMissing: boolean;
+  sqlitePresent: boolean;
+  sessionIndexPresent: boolean | null;
+  indexedPresent: boolean;
+  codexResumeVisible: boolean | null;
+  appServerVisible: boolean | null;
+  sourcePaths: string[];
+}
+
+export interface VisibilitySummary {
+  totalThreads: number;
+  activeInLocalStorage: number;
+  archivedInLocalStorage: number;
+  rolloutFileMissing: number;
+  sqlitePresent: number;
+  sessionIndexPresent: number | null;
+  indexedPresent: number;
+  codexResumeVisible: number | null;
+  appServerVisible: number | null;
+}
+
+export interface VisibilityDiagnostics {
+  codexHome: string;
+  indexPath: string;
+  generatedAt: string;
+  probes: VisibilityProbeReport[];
+  diagnostics: Diagnostic[];
+  summary: VisibilitySummary;
+  threads: ThreadVisibilityRecord[];
+}

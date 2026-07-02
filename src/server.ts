@@ -9,6 +9,7 @@ import {
   searchThreads,
 } from "./indexer.js";
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
+import { diagnoseVisibility } from "./visibility.js";
 import type { ScanResult, SearchIndexMeta, ThreadQuery } from "./types.js";
 
 const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
@@ -23,6 +24,24 @@ export interface ServeOptions {
 export async function serve(options: ServeOptions): Promise<void> {
   const codexHome = options.codexHome ?? defaultCodexHome();
   const indexPath = options.indexPath ?? defaultIndexPath();
+  const server = createServer(createRequestHandler({ codexHome, indexPath }));
+
+  await new Promise<void>((resolve) => {
+    server.listen(options.port, options.host, resolve);
+  });
+
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : options.port;
+  console.log(`codex-archiver listening on http://${options.host}:${port}`);
+  console.log(`Codex home: ${codexHome}`);
+  console.log(`search index: ${indexPath}`);
+}
+
+export function createRequestHandler(options: {
+  codexHome: string;
+  indexPath: string;
+}): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
+  const { codexHome, indexPath } = options;
   let indexInFlight: Promise<SearchIndexMeta> | null = null;
 
   async function ensureIndex(): Promise<SearchIndexMeta> {
@@ -39,7 +58,7 @@ export async function serve(options: ServeOptions): Promise<void> {
     return indexInFlight;
   }
 
-  const server = createServer(async (request, response) => {
+  return async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
@@ -50,6 +69,26 @@ export async function serve(options: ServeOptions): Promise<void> {
       if (url.pathname === "/api/diagnostics") {
         await ensureIndex();
         return sendJson(response, metaToResponse(await readSearchIndexMeta({ codexHome, indexPath })));
+      }
+
+      if (url.pathname === "/api/visibility") {
+        const appServerUrl = url.searchParams.get("appServerUrl") ?? undefined;
+        if (appServerUrl && !isLocalUrl(appServerUrl)) {
+          return sendJson(response, { error: "appServerUrl must point to localhost." }, 400);
+        }
+        await ensureIndex();
+        return sendJson(
+          response,
+          await diagnoseVisibility({
+            codexHome,
+            indexPath,
+            timeoutMs: parseIntegerParam(url.searchParams.get("timeoutMs")),
+            includeCodexResume: url.searchParams.get("codexResume") !== "0",
+            includeAppServer: url.searchParams.get("appServer") !== "0",
+            appServerUrl,
+            includeThreads: url.searchParams.get("includeThreads") !== "0",
+          }),
+        );
       }
 
       if (url.pathname === "/api/index/rebuild" && request.method === "POST") {
@@ -88,17 +127,7 @@ export async function serve(options: ServeOptions): Promise<void> {
         500,
       );
     }
-  });
-
-  await new Promise<void>((resolve) => {
-    server.listen(options.port, options.host, resolve);
-  });
-
-  const address = server.address();
-  const port = typeof address === "object" && address ? address.port : options.port;
-  console.log(`codex-archiver listening on http://${options.host}:${port}`);
-  console.log(`Codex home: ${codexHome}`);
-  console.log(`search index: ${indexPath}`);
+  };
 }
 
 async function sendStatic(
@@ -158,6 +187,15 @@ function authorizeApiRequest(request: IncomingMessage): boolean {
   try {
     const parsed = new URL(origin);
     return ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isLocalUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname);
   } catch {
     return false;
   }
