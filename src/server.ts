@@ -9,7 +9,7 @@ import {
   searchThreads,
 } from "./indexer.js";
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
-import { createRestorePlan } from "./restore.js";
+import { applyRestorePlan, createRestorePlan, type CodexProcessDetector } from "./restore.js";
 import { diagnoseVisibility } from "./visibility.js";
 import type { RestoreProcessCheckMode, ScanResult, SearchIndexMeta, ThreadQuery } from "./types.js";
 
@@ -41,8 +41,9 @@ export async function serve(options: ServeOptions): Promise<void> {
 export function createRequestHandler(options: {
   codexHome: string;
   indexPath: string;
+  processDetector?: CodexProcessDetector;
 }): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
-  const { codexHome, indexPath } = options;
+  const { codexHome, indexPath, processDetector } = options;
   let indexInFlight: Promise<SearchIndexMeta> | null = null;
 
   async function ensureIndex(): Promise<SearchIndexMeta> {
@@ -87,6 +88,33 @@ export function createRequestHandler(options: {
             indexPath,
             selectedThreadIds,
             processCheckMode: planOptions.processCheckMode,
+            processDetector,
+          }),
+        );
+      }
+
+      if (url.pathname === "/api/restore/apply") {
+        if (request.method !== "POST") {
+          return sendJson(response, { error: "Method not allowed" }, 405);
+        }
+        const body = await readJsonBody(request);
+        const applyOptions = restoreApplyOptionsFromBody(body);
+        if (applyOptions.selectedThreadIds.length === 0) {
+          return sendJson(response, { error: "selectedThreadIds must contain at least one thread id." }, 400);
+        }
+        if (applyOptions.processCheckMode === "invalid") {
+          return sendJson(response, { error: "processCheck must be warn, strict, or skip." }, 400);
+        }
+        return sendJson(
+          response,
+          await applyRestorePlan({
+            codexHome,
+            indexPath,
+            selectedThreadIds: applyOptions.selectedThreadIds,
+            processCheckMode: applyOptions.processCheckMode,
+            confirmationToken: applyOptions.confirmationToken,
+            confirmationPhrase: applyOptions.confirmationPhrase,
+            processDetector,
           }),
         );
       }
@@ -232,6 +260,35 @@ function restorePlanOptionsFromBody(body: unknown): {
     return { selectedThreadIds, processCheckMode: processCheck };
   }
   return { selectedThreadIds, processCheckMode: "invalid" };
+}
+
+function restoreApplyOptionsFromBody(body: unknown): {
+  selectedThreadIds: string[];
+  processCheckMode: RestoreProcessCheckMode | "invalid";
+  confirmationToken?: string;
+  confirmationPhrase?: string;
+} {
+  const planOptions = restorePlanOptionsFromBody(body);
+  if (typeof body !== "object" || body === null) {
+    return {
+      ...planOptions,
+      confirmationToken: undefined,
+      confirmationPhrase: undefined,
+    };
+  }
+  const typed = body as {
+    confirmationToken?: unknown;
+    confirmToken?: unknown;
+    confirmationPhrase?: unknown;
+    confirmPhrase?: unknown;
+  };
+  const token = typed.confirmationToken ?? typed.confirmToken;
+  const phrase = typed.confirmationPhrase ?? typed.confirmPhrase;
+  return {
+    ...planOptions,
+    confirmationToken: typeof token === "string" ? token : undefined,
+    confirmationPhrase: typeof phrase === "string" ? phrase : undefined,
+  };
 }
 
 function contentType(filePath: string): string {

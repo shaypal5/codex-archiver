@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { createRestorePlan } from "./restore.js";
+import { applyRestorePlan, createRestorePlan } from "./restore.js";
 import { createRequestHandler } from "./server.js";
 
 test("restore planner classifies explicit selections without mutating codex home", async (t) => {
@@ -86,6 +86,8 @@ test("restore planner classifies explicit selections without mutating codex home
   assert(plan.backupPreview.plannedBackupRoot.includes("restore-2026-07-02T10-00-00-000Z-"));
   assert.equal(plan.reportPreview.readOnlyPreview, true);
   assert.equal(plan.reportPreview.wouldWriteReport, false);
+  assert.match(plan.reportPreview.planHash, /^[a-f0-9]{64}$/);
+  assert.match(plan.reportPreview.confirmationToken, /^restore-[a-f0-9]{16}$/);
   assert(plan.reportPreview.requiredFields.includes("backupManifest"));
 });
 
@@ -276,7 +278,275 @@ test("restore plan API requires local intent guard for POST and returns dry-run 
   assert.equal(plan.items?.[0]?.actionability, "future-apply");
   assert.equal(plan.preflight?.processCheckMode, "skip");
   assert(plan.backupPreview?.targets.some((target) => target.sourcePath.endsWith("state_5.sqlite") && target.exists));
-  assert(plan.reportPreview?.requiredFields.includes("undoPlan"));
+  assert(plan.reportPreview?.requiredFields.includes("mutations"));
+});
+
+test("restore apply requires confirmation and does not mutate codex home without it", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore apply tests");
+    return;
+  }
+
+  const fixture = await createFixture(t);
+  const before = await snapshotFiles(fixture.codexHome);
+  const report = await applyRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    processDetector: async () => ({
+      status: "checked",
+      processes: [],
+      evidence: ["mock process table checked"],
+    }),
+    now: new Date("2026-07-02T12:00:00.000Z"),
+  });
+  const after = await snapshotFiles(fixture.codexHome);
+
+  assert.deepEqual(after, before);
+  assert.equal(report.result.status, "blocked");
+  assert.match(report.result.message, /Confirmation did not match/);
+  assert.equal(report.backupManifest.targets.length, 0);
+});
+
+test("restore apply backs up, mutates archived SQLite thread, reports, and verifies", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore apply tests");
+    return;
+  }
+
+  const fixture = await createFixture(t);
+  const plan = await createRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread", "hidden-thread", "restorable-thread"],
+    processDetector: async () => ({
+      status: "checked",
+      processes: [],
+      evidence: ["mock process table checked"],
+    }),
+    now: new Date("2026-07-02T12:10:00.000Z"),
+  });
+  const report = await applyRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread", "hidden-thread", "restorable-thread"],
+    confirmationToken: plan.reportPreview.confirmationToken,
+    processDetector: async () => ({
+      status: "checked",
+      processes: [],
+      evidence: ["mock process table checked"],
+    }),
+    now: new Date("2026-07-02T12:10:00.000Z"),
+  });
+
+  assert.equal(report.result.status, "succeeded");
+  assert.equal(report.verification.status, "succeeded");
+  assert.deepEqual(report.verification.restoredThreadIds, ["archived-thread"]);
+  assert(report.items.find((item) => item.threadId === "hidden-thread")?.warnings.length);
+  assert(report.items.find((item) => item.threadId === "restorable-thread")?.warnings.length);
+  assert(report.backupManifest.targets.some((target) => target.sourcePath.endsWith("state_5.sqlite") && target.exists));
+  assert(report.backupManifest.targets.some((target) => target.sourcePath.endsWith("session_index.jsonl") && target.exists));
+  assert(report.backupManifest.targets.some((target) => target.sourcePath.endsWith("archived.jsonl") && target.exists));
+  assert(await exists(report.backupManifest.manifestPath));
+  assert(await exists(report.result.reportPath));
+
+  const activeTarget = path.join(fixture.codexHome, "sessions", "archived.jsonl");
+  assert.equal((await readFile(activeTarget, "utf8")).includes("archived-thread"), true);
+  const rows = readSqliteRows(fixture.codexHome, "archived-thread");
+  assert.equal(rows[0]?.archived, 0);
+  assert.equal(rows[0]?.rollout_path, activeTarget);
+  const sessionIndex = await readFile(path.join(fixture.codexHome, "session_index.jsonl"), "utf8");
+  assert.match(sessionIndex, /archived-thread/);
+  assert.match(sessionIndex, /sessions\/archived\.jsonl/);
+});
+
+test("restore apply blocks on preflight failures before mutation", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore apply tests");
+    return;
+  }
+
+  const fixture = await createFixture(t, { withTargetConflict: true });
+  const plan = await createRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    processDetector: async () => ({
+      status: "checked",
+      processes: [],
+      evidence: ["mock process table checked"],
+    }),
+  });
+  const before = await snapshotFiles(fixture.codexHome);
+  const report = await applyRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    confirmationToken: plan.reportPreview.confirmationToken,
+    processDetector: async () => ({
+      status: "checked",
+      processes: [],
+      evidence: ["mock process table checked"],
+    }),
+  });
+  const after = await snapshotFiles(fixture.codexHome);
+
+  assert.deepEqual(after, before);
+  assert.equal(report.result.status, "blocked");
+  assert.match(report.result.message, /Preflight did not pass/);
+  assert.equal(report.backupManifest.targets.length, 0);
+});
+
+test("restore apply rolls back file changes when SQLite transaction fails", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore apply tests");
+    return;
+  }
+
+  const fixture = await createFixture(t);
+  const plan = await createRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    processDetector: async () => ({
+      status: "checked",
+      processes: [],
+      evidence: ["mock process table checked"],
+    }),
+  });
+  const before = await snapshotFiles(fixture.codexHome);
+  const report = await applyRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    confirmationToken: plan.reportPreview.confirmationToken,
+    processDetector: async () => ({
+      status: "checked",
+      processes: [],
+      evidence: ["mock process table checked"],
+    }),
+    sqlRunner: async () => {
+      throw new Error("simulated sqlite failure");
+    },
+  });
+  const after = await snapshotFiles(fixture.codexHome);
+
+  assert.deepEqual(after, before);
+  assert.equal(report.result.status, "failed");
+  assert.match(report.result.message, /simulated sqlite failure/);
+  assert(report.mutations.some((mutation) => mutation.status === "rolled-back"));
+  assert.equal(readSqliteRows(fixture.codexHome, "archived-thread")[0]?.archived, 1);
+});
+
+test("restore apply CLI is confirmation-gated", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore CLI tests");
+    return;
+  }
+
+  const fixture = await createFixture(t);
+  const before = await snapshotFiles(fixture.codexHome);
+  const stdout = execFileSync(
+    process.execPath,
+    [
+      path.resolve("dist/cli.js"),
+      "restore",
+      "apply",
+      "archived-thread",
+      "--codex-home",
+      fixture.codexHome,
+      "--index-path",
+      fixture.indexPath,
+      "--confirm-token",
+      "wrong-token",
+      "--skip-process-check",
+    ],
+    { encoding: "utf8" },
+  );
+  const report = JSON.parse(stdout) as { result?: { status: string; message: string } };
+  const after = await snapshotFiles(fixture.codexHome);
+
+  assert.deepEqual(after, before);
+  assert.equal(report.result?.status, "blocked");
+  assert.match(report.result?.message ?? "", /Confirmation did not match/);
+});
+
+test("restore apply API requires local intent and confirmation before mutation", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore API tests");
+    return;
+  }
+
+  const fixture = await createFixture(t);
+  const server = createServer(
+    createRequestHandler({
+      codexHome: fixture.codexHome,
+      indexPath: fixture.indexPath,
+      processDetector: async () => ({
+        status: "checked",
+        processes: [],
+        evidence: ["mock process table checked"],
+      }),
+    }),
+  );
+  t.after(async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const body = JSON.stringify({ selectedThreadIds: ["archived-thread"], processCheck: "warn" });
+
+  const missingIntent = await fetch(`${baseUrl}/api/restore/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  assert.equal(missingIntent.status, 403);
+
+  const noConfirmation = await fetch(`${baseUrl}/api/restore/apply`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Codex-Archiver-Intent": "local-api",
+    },
+    body,
+  });
+  assert.equal(noConfirmation.status, 200);
+  const blocked = (await noConfirmation.json()) as { result?: { status: string } };
+  assert.equal(blocked.result?.status, "blocked");
+
+  const planResponse = await fetch(`${baseUrl}/api/restore/plan`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Codex-Archiver-Intent": "local-api",
+    },
+    body,
+  });
+  const plan = (await planResponse.json()) as { reportPreview?: { confirmationToken: string } };
+  const accepted = await fetch(`${baseUrl}/api/restore/apply`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Codex-Archiver-Intent": "local-api",
+      Origin: "http://127.0.0.1",
+    },
+    body: JSON.stringify({
+      selectedThreadIds: ["archived-thread"],
+      processCheck: "warn",
+      confirmationToken: plan.reportPreview?.confirmationToken,
+    }),
+  });
+  assert.equal(accepted.status, 200);
+  const report = (await accepted.json()) as { result?: { status: string }; verification?: { status: string } };
+  assert.equal(report.result?.status, "succeeded");
+  assert.equal(report.verification?.status, "succeeded");
 });
 
 async function createFixture(
@@ -412,6 +682,16 @@ function execSql(dbPath: string, statements: string[]): void {
   execFileSync("sqlite3", [dbPath, statements.join("\n")]);
 }
 
+function readSqliteRows(codexHome: string, threadId: string): Array<{ archived: number; rollout_path: string }> {
+  const dbPath = path.join(codexHome, "state_5.sqlite");
+  const stdout = execFileSync(
+    "sqlite3",
+    ["-json", dbPath, `SELECT archived, rollout_path FROM threads WHERE id = ${sqlValue(threadId)};`],
+    { encoding: "utf8" },
+  );
+  return JSON.parse(stdout || "[]") as Array<{ archived: number; rollout_path: string }>;
+}
+
 function sqlValue(value: string | number): string {
   if (typeof value === "number") {
     return String(value);
@@ -436,6 +716,15 @@ async function snapshotFiles(root: string): Promise<Record<string, string>> {
     snapshot[relative] = body.toString("base64");
   }
   return snapshot;
+}
+
+async function exists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function listFiles(root: string): Promise<string[]> {
