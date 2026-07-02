@@ -8,6 +8,8 @@ Early scaffold. Browsing, scanning, diagnostics, indexing, restore planning, and
 
 ## Usage
 
+Use the local browser directly from a checkout:
+
 ```bash
 npm install
 npm run build
@@ -26,10 +28,41 @@ The web UI also includes a visibility diagnostics panel. It compares the local s
 
 The browser also lets you select specific threads and generate a dry-run restore plan. The plan previews classifications, preflight checks, blockers, warnings, backup manifest entries, restore report fields, confirmation token, and mutation targets. Apply is intentionally CLI/API-gated for now.
 
+## Install
+
+From a local checkout during development:
+
+```bash
+npm install
+npm run build
+npm link
+codex-archiver --help
+codex-archiver serve
+```
+
+From a packed tarball, without publishing to npm:
+
+```bash
+npm pack
+npm install -g ./codex-archiver-0.1.0.tgz
+codex-archiver --version
+codex-archiver serve
+```
+
+`npm pack` runs the TypeScript build through `prepack`. Package artifacts include the compiled CLI/server, top-level `web/` assets used by `codex-archiver serve`, README, license, and docs. Source files, tests, GitHub workflow files, local worktrees, and package smoke-test scripts are intentionally excluded from the install artifact.
+
+Run the package smoke test before release handoff:
+
+```bash
+npm run package:smoke
+```
+
+The smoke test creates a real package tarball in a temporary directory, installs it into a temporary consumer project, verifies the `codex-archiver` bin, checks `--help` and `--version`, and verifies required runtime/docs files are present while private/test-only files are absent. Publishing to npm is not automated by this project yet.
+
 ## CLI
 
 ```bash
-npm run scan
+codex-archiver scan
 ```
 
 The scanner reads:
@@ -41,8 +74,8 @@ The scanner reads:
 Use a non-default Codex home with:
 
 ```bash
-node dist/cli.js serve --codex-home /path/to/.codex
-node dist/cli.js scan --codex-home /path/to/.codex
+codex-archiver serve --codex-home /path/to/.codex
+codex-archiver scan --codex-home /path/to/.codex
 ```
 
 ## Search Index
@@ -56,19 +89,19 @@ The web UI uses a persistent local SQLite/FTS5 search index at:
 Build or refresh it with:
 
 ```bash
-node dist/cli.js index rebuild
+codex-archiver index rebuild
 ```
 
 Inspect it with:
 
 ```bash
-node dist/cli.js index status
+codex-archiver index status
 ```
 
 Clear it with:
 
 ```bash
-node dist/cli.js index clear
+codex-archiver index clear
 ```
 
 See [docs/search-index.md](docs/search-index.md) for details.
@@ -78,7 +111,7 @@ See [docs/search-index.md](docs/search-index.md) for details.
 Run read-only visibility diagnostics with:
 
 ```bash
-node dist/cli.js diagnose visibility
+codex-archiver diagnose visibility
 ```
 
 The report keeps evidence sources separate for each indexed/scanned thread:
@@ -95,9 +128,9 @@ The report keeps evidence sources separate for each indexed/scanned thread:
 Live Codex probes are best-effort and time-limited. Use these flags when needed:
 
 ```bash
-node dist/cli.js diagnose visibility --timeout-ms 5000
-node dist/cli.js diagnose visibility --no-codex-resume --no-app-server
-node dist/cli.js diagnose visibility --app-server-url http://127.0.0.1:PORT
+codex-archiver diagnose visibility --timeout-ms 5000
+codex-archiver diagnose visibility --no-codex-resume --no-app-server
+codex-archiver diagnose visibility --app-server-url http://127.0.0.1:PORT
 ```
 
 The app-server URL may also be set with `CODEX_ARCHIVER_CODEX_APP_SERVER_URL`.
@@ -108,10 +141,10 @@ The app-server `/thread/list` parser accepts common `payload` / `data` / `result
 Create an explicit dry-run restore plan for selected thread ids with:
 
 ```bash
-node dist/cli.js restore plan THREAD_ID...
-node dist/cli.js restore plan --ids thread-a,thread-b --json
-node dist/cli.js restore plan THREAD_ID --process-check strict
-node dist/cli.js restore plan THREAD_ID --skip-process-check
+codex-archiver restore plan THREAD_ID...
+codex-archiver restore plan --ids thread-a,thread-b --json
+codex-archiver restore plan THREAD_ID --process-check strict
+codex-archiver restore plan THREAD_ID --skip-process-check
 ```
 
 The planner classifies selected threads as archived SQLite, JSONL-only archived, UI-hidden active, missing source, already active, not found, or unsupported. Planning includes impact, preflight, backup manifest, restore report previews, and a confirmation token, but it never creates backups or mutates `~/.codex`.
@@ -119,8 +152,8 @@ The planner classifies selected threads as archived SQLite, JSONL-only archived,
 Apply the current safe subset with:
 
 ```bash
-node dist/cli.js restore plan THREAD_ID --process-check warn
-node dist/cli.js restore apply THREAD_ID --confirm-token restore-...
+codex-archiver restore plan THREAD_ID --process-check warn
+codex-archiver restore apply THREAD_ID --confirm-token restore-...
 ```
 
 `restore apply` recomputes the plan immediately before mutation, requires the confirmation token or phrase from the plan, blocks on any non-passing preflight check, creates a timestamped backup root under `~/.cache/codex-archiver/backups`, writes a machine-readable report, then verifies by rescanning. M4 apply supports only archived SQLite threads with existing archived JSONL evidence. JSONL-only archived threads and UI-hidden active threads remain diagnostic-only.
@@ -128,13 +161,17 @@ node dist/cli.js restore apply THREAD_ID --confirm-token restore-...
 Preview rollback from an apply backup/report artifact with:
 
 ```bash
-node dist/cli.js restore undo --report /path/to/restore-report.json
-node dist/cli.js restore undo --backup-root /path/to/backup-root
+codex-archiver restore undo --report /path/to/restore-report.json
+codex-archiver restore undo --backup-root /path/to/backup-root
 ```
 
 The preview validates the report schema, backup manifest, backup file hashes/sizes, target paths, and Codex process preflight, then shows target restore/remove actions plus an undo confirmation token. Confirmed undo creates a fresh rollback-safety backup, restores backed files, removes apply-created active-session files recorded in the apply report, rebuilds the derived search index, writes a machine-readable undo report, and verifies by rescanning.
 
 See [docs/restore-planning.md](docs/restore-planning.md) for the `M3-RESTORE-PLAN`, `M3-PREFLIGHT-BACKUP-PREVIEW`, `M4-RESTORE-APPLY-BACKUPS`, and `M4-RESTORE-UNDO-BACKUPS` contracts, CLI/API details, and safety boundaries.
+
+## Planning
+
+`M5-PACKAGING-RELEASE-HARDENING` under milestone `M5: Packaging and release hardening` covers package metadata, installable artifacts, package smoke validation, CI release checks, and install/release documentation. It does not introduce npm publishing credentials or automated publishing.
 
 ## CI
 
@@ -143,7 +180,10 @@ Pull requests run GitHub Actions CI with:
 - `npm ci`
 - `npm run check`
 - `npm test`
+- `npm run package:smoke`
 
 ## Safety
 
 The only supported `~/.codex` mutation paths are explicit restore apply and explicit restore undo from an existing backup/report artifact. Do not run apply or confirmed undo while Codex Desktop or related Codex processes are open. Keep apply backup roots, apply reports, undo safety backups, and undo reports until the restored state is confirmed healthy.
+
+The package never stores cache/index state under `~/.codex`; derived search state and backup artifacts stay under `~/.cache/codex-archiver` unless explicitly overridden. `~/.codex` remains the source of truth.

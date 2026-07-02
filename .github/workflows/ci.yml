@@ -32,3 +32,6 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Package smoke
+        run: npm run package:smoke
