@@ -9,6 +9,7 @@ import {
   searchThreads,
 } from "./indexer.js";
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
+import { createRestorePlan } from "./restore.js";
 import { diagnoseVisibility } from "./visibility.js";
 import type { ScanResult, SearchIndexMeta, ThreadQuery } from "./types.js";
 
@@ -64,6 +65,25 @@ export function createRequestHandler(options: {
 
       if (url.pathname.startsWith("/api/") && !authorizeApiRequest(request)) {
         return sendJson(response, { error: "Forbidden" }, 403);
+      }
+
+      if (url.pathname === "/api/restore/plan") {
+        if (request.method !== "POST") {
+          return sendJson(response, { error: "Method not allowed" }, 405);
+        }
+        const body = await readJsonBody(request);
+        const selectedThreadIds = selectedThreadIdsFromBody(body);
+        if (selectedThreadIds.length === 0) {
+          return sendJson(response, { error: "selectedThreadIds must contain at least one thread id." }, 400);
+        }
+        return sendJson(
+          response,
+          await createRestorePlan({
+            codexHome,
+            indexPath,
+            selectedThreadIds,
+          }),
+        );
       }
 
       if (url.pathname === "/api/diagnostics") {
@@ -155,6 +175,35 @@ async function sendStatic(
 function sendJson(response: ServerResponse, value: unknown, status = 200): void {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(value, null, 2));
+}
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > 1024 * 1024) {
+      throw new Error("Request body is too large.");
+    }
+    chunks.push(buffer);
+  }
+  const text = Buffer.concat(chunks).toString("utf8").trim();
+  if (!text) {
+    return {};
+  }
+  return JSON.parse(text) as unknown;
+}
+
+function selectedThreadIdsFromBody(body: unknown): string[] {
+  if (typeof body !== "object" || body === null || !("selectedThreadIds" in body)) {
+    return [];
+  }
+  const value = (body as { selectedThreadIds?: unknown }).selectedThreadIds;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
 function contentType(filePath: string): string {
