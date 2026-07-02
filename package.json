@@ -3,12 +3,42 @@
   "version": "0.1.0",
   "description": "Local browser and restoration tooling for Codex Desktop threads.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shaypal5/codex-archiver.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shaypal5/codex-archiver/issues"
+  },
+  "homepage": "https://github.com/shaypal5/codex-archiver#readme",
+  "keywords": [
+    "codex",
+    "codex-desktop",
+    "local-tool",
+    "threads",
+    "archive",
+    "restore"
+  ],
   "bin": {
     "codex-archiver": "./dist/cli.js"
   },
+  "files": [
+    "dist/**/*.js",
+    "!dist/*.test.js",
+    "docs/install-release.md",
+    "docs/restore-planning.md",
+    "docs/search-index.md",
+    "docs/visibility-diagnostics.md",
+    "web/**/*",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
+    "prepack": "npm run build",
+    "package:smoke": "node scripts/package-smoke.mjs",
     "test": "npm run build && node --test dist/*.test.js",
     "start": "node dist/cli.js serve",
     "scan": "node dist/cli.js scan"

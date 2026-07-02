@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   clearSearchIndex,
   readSearchIndexMeta,
@@ -22,6 +25,16 @@ class UsageError extends Error {}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+
+  if (args.command === "help" || args.command === "--help" || args.command === "-h") {
+    printHelp();
+    return;
+  }
+
+  if (args.command === "version" || args.command === "--version" || args.command === "-v") {
+    console.log(await readPackageVersion());
+    return;
+  }
 
   if (args.command === "scan") {
     const codexHome = stringFlag(args, "codex-home") ?? defaultCodexHome();
@@ -189,7 +202,7 @@ async function main(): Promise<void> {
   }
 
   printHelp();
-  process.exit(args.command === "help" ? 0 : 1);
+  process.exit(1);
 }
 
 function parseArgs(values: string[]): ParsedArgs {
@@ -239,6 +252,15 @@ function booleanFlag(args: ParsedArgs, name: string): boolean {
   return args.flags.get(name) === true;
 }
 
+async function readPackageVersion(): Promise<string> {
+  const packageJsonPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8")) as { version?: unknown };
+  if (typeof packageJson.version !== "string" || packageJson.version.length === 0) {
+    throw new UsageError("package.json does not contain a valid version.");
+  }
+  return packageJson.version;
+}
+
 function parseStatusFlag(value: string | null): RestoreStatus | "all" {
   if (value === null || value === "all") {
     return "all";
@@ -270,6 +292,8 @@ function printHelp(): void {
   console.log(`codex-archiver
 
 Usage:
+  codex-archiver --help
+  codex-archiver --version
   codex-archiver serve [--host 127.0.0.1] [--port 8976] [--codex-home ~/.codex] [--index-path ~/.cache/codex-archiver/index.sqlite]
   codex-archiver scan [--codex-home ~/.codex]
   codex-archiver index rebuild [--codex-home ~/.codex] [--index-path ~/.cache/codex-archiver/index.sqlite]
@@ -283,6 +307,8 @@ Usage:
   codex-archiver restore undo --backup-root /path/to/backup-root [--confirm-token undo-...]
 
 Commands:
+  help    Print CLI usage.
+  version Print the package version.
   serve   Start the local read-only browser.
   scan    Print a read-only JSON scan of Codex thread storage.
   index   Manage and query the persistent local search index.
