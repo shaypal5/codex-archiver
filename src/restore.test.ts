@@ -82,6 +82,7 @@ test("restore planner classifies explicit selections without mutating codex home
   assert.equal(stateBackup.exists, true);
   assert.equal(stateBackup.hashStatus, "sha256");
   assert.match(stateBackup.sha256 ?? "", /^[a-f0-9]{64}$/);
+  assert(!plan.backupPreview.targets.some((target) => target.sourcePath.endsWith("active.jsonl")));
   assert(plan.backupPreview.plannedBackupRoot.includes("restore-2026-07-02T10-00-00-000Z-"));
   assert.equal(plan.reportPreview.readOnlyPreview, true);
   assert.equal(plan.reportPreview.wouldWriteReport, false);
@@ -240,6 +241,16 @@ test("restore plan API requires local intent guard for POST and returns dry-run 
     body: "{",
   });
   assert.equal(invalidJson.status, 400);
+
+  const invalidProcessCheck = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Codex-Archiver-Intent": "local-api",
+    },
+    body: JSON.stringify({ selectedThreadIds: ["archived-thread"], processCheck: "enforce" }),
+  });
+  assert.equal(invalidProcessCheck.status, 400);
 
   const accepted = await fetch(url, {
     method: "POST",

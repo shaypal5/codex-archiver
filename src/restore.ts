@@ -500,7 +500,7 @@ function buildBackupPreview(
   backupRoot: string,
   items: RestorePlanItem[],
 ): RestorePlanBackupPreview {
-  const allPlanned = items.flatMap((item) => item.plannedPaths);
+  const allPlanned = items.flatMap((item) => item.plannedPaths.filter((planned) => planned.requiredBeforeApply));
   const byPath = new Map<string, RestorePlanPlannedPath>();
   for (const planned of allPlanned) {
     const existing = byPath.get(planned.path);
