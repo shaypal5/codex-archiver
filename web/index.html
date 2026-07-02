@@ -60,6 +60,18 @@
 
       <section class="diagnostics" id="diagnostics" aria-live="polite"></section>
 
+      <section class="visibility-panel" aria-label="Visibility diagnostics">
+        <div class="section-title">
+          <div>
+            <h2>Visibility diagnostics</h2>
+            <p id="visibility-meta">Checking local and Codex visibility surfaces...</p>
+          </div>
+          <button id="visibility-refresh" type="button">Check visibility</button>
+        </div>
+        <div class="visibility-grid" id="visibility-summary"></div>
+        <div class="probe-list" id="visibility-probes"></div>
+      </section>
+
       <section class="results-bar" aria-label="Search results">
         <span id="result-count">No results loaded.</span>
         <div class="pager">

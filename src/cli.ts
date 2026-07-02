@@ -8,6 +8,7 @@ import {
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
 import { scanCodexStorage } from "./scanner.js";
 import { serve } from "./server.js";
+import { diagnoseVisibility } from "./visibility.js";
 import type { RestoreStatus } from "./types.js";
 
 interface ParsedArgs {
@@ -79,6 +80,36 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.command === "diagnose") {
+    const action = args.positionals[0] ?? "help";
+    const codexHome = stringFlag(args, "codex-home") ?? defaultCodexHome();
+    const indexPath = stringFlag(args, "index-path") ?? defaultIndexPath();
+
+    if (action === "visibility") {
+      console.log(
+        JSON.stringify(
+          await diagnoseVisibility({
+            codexHome,
+            indexPath,
+            timeoutMs: numberFlag(args, "timeout-ms") ?? undefined,
+            includeCodexResume: !booleanFlag(args, "no-codex-resume"),
+            includeAppServer: !booleanFlag(args, "no-app-server"),
+            appServerUrl: stringFlag(args, "app-server-url") ?? undefined,
+            codexCommand: stringFlag(args, "codex-command") ?? undefined,
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    console.error(`Unknown diagnose action: ${action}`);
+    printHelp();
+    process.exit(1);
+    return;
+  }
+
   printHelp();
   process.exit(args.command === "help" ? 0 : 1);
 }
@@ -126,6 +157,10 @@ function numberFlag(args: ParsedArgs, name: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function booleanFlag(args: ParsedArgs, name: string): boolean {
+  return args.flags.get(name) === true;
+}
+
 function parseStatusFlag(value: string | null): RestoreStatus | "all" {
   if (value === null || value === "all") {
     return "all";
@@ -153,11 +188,14 @@ Usage:
   codex-archiver index status [--index-path ~/.cache/codex-archiver/index.sqlite]
   codex-archiver index search [--title text] [--content text] [--cwd path] [--status active] [--limit 100] [--offset 0]
   codex-archiver index clear [--index-path ~/.cache/codex-archiver/index.sqlite]
+  codex-archiver diagnose visibility [--timeout-ms 2500] [--no-codex-resume] [--app-server-url http://127.0.0.1:PORT]
 
 Commands:
   serve   Start the local read-only browser.
   scan    Print a read-only JSON scan of Codex thread storage.
   index   Manage and query the persistent local search index.
+  diagnose
+          Run read-only diagnostics that compare local/indexed threads with best-effort Codex visibility surfaces.
 `);
 }
 

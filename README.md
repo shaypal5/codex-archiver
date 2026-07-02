@@ -22,6 +22,8 @@ http://127.0.0.1:8976
 
 The first screen shows summary badges for total threads, total projects, and active indexed threads, followed by separate filters for thread names, content previews, project paths, and restoration status.
 
+The web UI also includes a visibility diagnostics panel. It compares the local scanned/indexed thread universe with best-effort Codex visibility surfaces when they are available, without mutating `~/.codex`.
+
 ## CLI
 
 ```bash
@@ -68,6 +70,35 @@ node dist/cli.js index clear
 ```
 
 See [docs/search-index.md](docs/search-index.md) for details.
+
+## Visibility Diagnostics
+
+Run read-only visibility diagnostics with:
+
+```bash
+node dist/cli.js diagnose visibility
+```
+
+The report keeps evidence sources separate for each indexed/scanned thread:
+
+- active rollout files under `~/.codex/sessions`
+- archived rollout files under `~/.codex/archived_sessions`
+- missing rollout/session files referenced by SQLite
+- SQLite `threads` presence
+- `session_index.jsonl` presence when the file exists
+- persistent search-index presence under `~/.cache/codex-archiver`
+- visibility through `codex resume --all --include-non-interactive` when the command succeeds
+- visibility through a Codex app-server `/thread/list` endpoint when configured
+
+Live Codex probes are best-effort and time-limited. Use these flags when needed:
+
+```bash
+node dist/cli.js diagnose visibility --timeout-ms 5000
+node dist/cli.js diagnose visibility --no-codex-resume --no-app-server
+node dist/cli.js diagnose visibility --app-server-url http://127.0.0.1:PORT
+```
+
+The app-server URL may also be set with `CODEX_ARCHIVER_CODEX_APP_SERVER_URL`.
 
 ## CI
 
