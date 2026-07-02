@@ -227,6 +227,11 @@ async function loadRestorePlan() {
       body: JSON.stringify({ selectedThreadIds: ids }),
     });
     renderRestorePlan(plan);
+  } catch (error) {
+    elements.restorePlanMeta.textContent = "Restore planning failed.";
+    elements.restorePlanOutput.replaceChildren(
+      restoreNote(error instanceof Error ? error.message : String(error)),
+    );
   } finally {
     elements.restorePlan.textContent = "Plan restore";
     renderSelectionState();

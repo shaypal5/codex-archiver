@@ -50,6 +50,14 @@ test("restore planner classifies explicit selections without mutating codex home
   assertItem(plan, "active-thread", "already-active", "no-op");
   assertItem(plan, "unknown-thread", "not-found", "rejected");
 
+  const missing = plan.items.find((item) => item.threadId === "missing-thread");
+  assert(missing);
+  assert.deepEqual(missing.backupPreview, []);
+
+  const active = plan.items.find((item) => item.threadId === "active-thread");
+  assert(active);
+  assert(active.reasons.some((reason) => reason.includes("visibility diagnostics")));
+
   const archived = plan.items.find((item) => item.threadId === "archived-thread");
   assert(archived);
   assert.equal(archived.evidence.sqlitePresent, true);
@@ -134,6 +142,16 @@ test("restore plan API requires local intent guard for POST and returns dry-run 
     body,
   });
   assert.equal(externalOrigin.status, 403);
+
+  const invalidJson = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Codex-Archiver-Intent": "local-api",
+    },
+    body: "{",
+  });
+  assert.equal(invalidJson.status, 400);
 
   const accepted = await fetch(url, {
     method: "POST",

@@ -144,7 +144,7 @@ export function createRequestHandler(options: {
       return sendJson(
         response,
         { error: error instanceof Error ? error.message : String(error) },
-        500,
+        error instanceof HttpError ? error.status : 500,
       );
     }
   };
@@ -184,7 +184,7 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
     if (bytes > 1024 * 1024) {
-      throw new Error("Request body is too large.");
+      throw new HttpError(413, "Request body is too large.");
     }
     chunks.push(buffer);
   }
@@ -192,7 +192,11 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   if (!text) {
     return {};
   }
-  return JSON.parse(text) as unknown;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new HttpError(400, "Request body must be valid JSON.");
+  }
 }
 
 function selectedThreadIdsFromBody(body: unknown): string[] {
@@ -292,4 +296,13 @@ function parseIntegerParam(value: string | null): number | undefined {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
 }

@@ -105,7 +105,7 @@ function planThread(input: {
       ],
       evidence,
       futureActions: ["Locate or recover the missing rollout/session JSONL file, then run restore planning again."],
-      backupPreview: standardBackups,
+      backupPreview: [],
       mutationPreview: [],
     });
   }
@@ -114,7 +114,10 @@ function planThread(input: {
     return itemForThread(thread, {
       classification: "already-active",
       actionability: "no-op",
-      reasons: ["The selected thread is already represented as active local Codex state."],
+      reasons: [
+        "The selected thread is already represented as active local Codex state.",
+        "If it is still absent from Codex UI, use visibility diagnostics rather than archive restore.",
+      ],
       evidence,
       futureActions: [],
       backupPreview: [],
@@ -188,7 +191,7 @@ function planThread(input: {
     ],
     evidence,
     futureActions: ["Collect more source evidence or add an explicit planner case before any apply phase."],
-    backupPreview: standardBackups,
+    backupPreview: [],
     mutationPreview: [],
   });
 }
