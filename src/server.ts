@@ -86,6 +86,7 @@ export function createRequestHandler(options: {
             includeCodexResume: url.searchParams.get("codexResume") !== "0",
             includeAppServer: url.searchParams.get("appServer") !== "0",
             appServerUrl,
+            includeThreads: url.searchParams.get("includeThreads") !== "0",
           }),
         );
       }

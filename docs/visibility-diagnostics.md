@@ -42,3 +42,4 @@ Query parameters:
 - `codexResume=0`: skip the `codex resume` probe.
 - `appServer=0`: skip the app-server probe.
 - `appServerUrl=http://127.0.0.1:PORT`: app-server base URL.
+- `includeThreads=0`: return summary/probe diagnostics without the per-thread detail array.

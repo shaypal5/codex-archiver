@@ -27,6 +27,7 @@ interface IndexedRow {
 interface SessionIndexEvidence {
   available: boolean;
   ids: Set<string>;
+  paths: Set<string>;
   report: VisibilityProbeReport;
 }
 
@@ -44,6 +45,7 @@ export interface VisibilityOptions {
   includeAppServer?: boolean;
   appServerUrl?: string;
   codexCommand?: string;
+  includeThreads?: boolean;
   codexResumeProbe?: () => Promise<ProbeUniverse>;
   appServerProbe?: () => Promise<ProbeUniverse>;
 }
@@ -70,6 +72,7 @@ export async function diagnoseVisibility(
   const threads = scan.threads.map((thread) =>
     classifyThreadVisibility(thread, {
       sessionIndexIds: sessionIndex.available ? sessionIndex.ids : null,
+      sessionIndexPaths: sessionIndex.available ? sessionIndex.paths : null,
       indexedIds: indexed.ids,
       codexResume,
       appServer,
@@ -83,7 +86,7 @@ export async function diagnoseVisibility(
     probes,
     diagnostics,
     summary: buildVisibilitySummary(threads),
-    threads,
+    threads: options.includeThreads === false ? [] : threads,
   };
 }
 
@@ -91,6 +94,7 @@ export function classifyThreadVisibility(
   thread: ThreadRecord,
   evidence: {
     sessionIndexIds: Set<string> | null;
+    sessionIndexPaths: Set<string> | null;
     indexedIds: Set<string>;
     codexResume: ProbeUniverse;
     appServer: ProbeUniverse;
@@ -100,7 +104,10 @@ export function classifyThreadVisibility(
   const archivedInLocalStorage = thread.existsOnDisk && hasSourceUnder(thread, "archived_sessions");
   const sqlitePresent = thread.storageKind === "sqlite-only" || thread.storageKind === "mixed";
   const sessionIndexPresent =
-    evidence.sessionIndexIds === null ? null : evidence.sessionIndexIds.has(thread.id);
+    evidence.sessionIndexIds === null || evidence.sessionIndexPaths === null
+      ? null
+      : evidence.sessionIndexIds.has(thread.id) ||
+        thread.sourcePaths.some((sourcePath) => evidence.sessionIndexPaths?.has(sourcePath));
   const codexResumeVisible = probeVisibility(thread, evidence.codexResume);
   const appServerVisible = probeVisibility(thread, evidence.appServer);
 
@@ -162,6 +169,7 @@ async function readSessionIndex(codexHome: string): Promise<SessionIndexEvidence
     return {
       available: false,
       ids: new Set(),
+      paths: new Set(),
       report: {
         name: "session-index",
         status: "unavailable",
@@ -174,6 +182,7 @@ async function readSessionIndex(codexHome: string): Promise<SessionIndexEvidence
   try {
     const text = await readFile(sessionIndexPath, "utf8");
     const ids = new Set<string>();
+    const paths = new Set<string>();
     for (const line of text.split(/\r?\n/)) {
       if (!line.trim()) {
         continue;
@@ -183,6 +192,9 @@ async function readSessionIndex(codexHome: string): Promise<SessionIndexEvidence
         for (const id of candidateIds(value)) {
           ids.add(id);
         }
+        for (const candidatePath of candidatePaths(value)) {
+          paths.add(resolveCodexPath(codexHome, candidatePath));
+        }
       } catch {
         continue;
       }
@@ -190,18 +202,20 @@ async function readSessionIndex(codexHome: string): Promise<SessionIndexEvidence
     return {
       available: true,
       ids,
+      paths,
       report: {
         name: "session-index",
         status: "available",
-        message: `Session index contains ${ids.size} candidate thread ids.`,
+        message: `Session index contains ${ids.size} candidate thread ids and ${paths.size} candidate paths.`,
         durationMs: Date.now() - startedAt,
-        visibleCount: ids.size,
+        visibleCount: ids.size + paths.size,
       },
     };
   } catch (error) {
     return {
       available: false,
       ids: new Set(),
+      paths: new Set(),
       report: {
         name: "session-index",
         status: "failed",
@@ -458,6 +472,14 @@ function candidateIds(value: unknown): string[] {
   ].filter((item): item is string => Boolean(item));
 }
 
+function candidatePaths(value: unknown): string[] {
+  return [
+    firstStringAt(value, [["rollout_path"], ["rolloutPath"], ["path"], ["file"]]),
+    firstStringAt(value, [["payload", "rollout_path"], ["payload", "rolloutPath"]]),
+    firstStringAt(value, [["session", "rollout_path"], ["session", "rolloutPath"]]),
+  ].filter((item): item is string => Boolean(item));
+}
+
 function firstStringAt(value: unknown, paths: string[][]): string | null {
   for (const parts of paths) {
     let current = value;
@@ -523,6 +545,10 @@ function normalizeBaseUrl(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
 }
 
+function resolveCodexPath(codexHome: string, candidatePath: string): string {
+  return path.isAbsolute(candidatePath) ? candidatePath : path.join(codexHome, candidatePath);
+}
+
 function countWhere<T>(items: T[], predicate: (item: T) => boolean): number {
   return items.filter(predicate).length;
 }
@@ -549,7 +575,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isTimeoutError(error: unknown): boolean {
-  return isRecord(error) && (error.signal === "SIGTERM" || error.killed === true);
+  return (
+    isRecord(error) &&
+    (error.signal === "SIGTERM" ||
+      error.killed === true ||
+      error.code === "ETIMEDOUT" ||
+      error.message === "Command failed: timeout")
+  );
 }
 
 function isAbortError(error: unknown): boolean {

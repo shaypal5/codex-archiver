@@ -28,6 +28,7 @@ test("visibility classifier keeps local, index, and probe states separate", () =
 
   const classified = classifyThreadVisibility(thread, {
     sessionIndexIds: new Set(["active-thread"]),
+    sessionIndexPaths: new Set(),
     indexedIds: new Set(["active-thread"]),
     codexResume: {
       ids: new Set(["active-thread"]),
@@ -89,6 +90,10 @@ test("diagnoseVisibility reports fixture states with mocked visibility probes", 
   assert.equal(orphaned.rolloutFileMissing, true);
   assert.equal(orphaned.sqlitePresent, true);
   assert.equal(orphaned.sessionIndexPresent, false);
+
+  const archived = result.threads.find((thread) => thread.id === "archived-thread");
+  assert(archived);
+  assert.equal(archived.sessionIndexPresent, true);
 });
 
 test("diagnose visibility CLI returns JSON diagnostics", async (t) => {
@@ -140,11 +145,15 @@ test("visibility API route returns diagnostics", async (t) => {
   assert(address && typeof address === "object");
 
   const response = await fetch(
-    `http://127.0.0.1:${address.port}/api/visibility?codexResume=0&appServer=0`,
+    `http://127.0.0.1:${address.port}/api/visibility?codexResume=0&appServer=0&includeThreads=0`,
   );
   assert.equal(response.status, 200);
-  const body = (await response.json()) as { summary?: { totalThreads?: number } };
+  const body = (await response.json()) as {
+    summary?: { totalThreads?: number };
+    threads?: unknown[];
+  };
   assert.equal(body.summary?.totalThreads, 3);
+  assert.deepEqual(body.threads, []);
 
   const rejected = await fetch(
     `http://127.0.0.1:${address.port}/api/visibility?appServerUrl=http://example.com`,
@@ -185,7 +194,7 @@ async function createFixture(t: TestContext): Promise<{ codexHome: string; index
     path.join(codexHome, "session_index.jsonl"),
     [
       JSON.stringify({ payload: { id: "active-thread" } }),
-      JSON.stringify({ payload: { id: "archived-thread" } }),
+      JSON.stringify({ payload: { rollout_path: archivedPath } }),
     ].join("\n"),
   );
   createSqliteState(codexHome, [

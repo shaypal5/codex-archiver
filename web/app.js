@@ -92,7 +92,7 @@ async function loadVisibility() {
   elements.visibilityRefresh.disabled = true;
   elements.visibilityRefresh.textContent = "Checking...";
   try {
-    const data = await fetchJson("/api/visibility");
+    const data = await fetchJson("/api/visibility?includeThreads=0");
     renderVisibility(data);
   } finally {
     elements.visibilityRefresh.disabled = false;
