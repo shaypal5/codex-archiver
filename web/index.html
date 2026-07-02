@@ -74,16 +74,29 @@
 
       <section class="results-bar" aria-label="Search results">
         <span id="result-count">No results loaded.</span>
-        <div class="pager">
+        <div class="result-actions">
+          <span id="selected-count">0 selected</span>
+          <button id="restore-plan" type="button" disabled>Plan restore</button>
           <button id="prev-page" type="button">Previous</button>
           <button id="next-page" type="button">Next</button>
         </div>
+      </section>
+
+      <section class="restore-panel" aria-label="Dry-run restore plan">
+        <div class="section-title">
+          <div>
+            <h2>Restore plan</h2>
+            <p id="restore-plan-meta">Select one or more threads to preview a read-only restore plan.</p>
+          </div>
+        </div>
+        <div id="restore-plan-output" class="restore-plan-output"></div>
       </section>
 
       <section class="table-wrap">
         <table>
           <thead>
             <tr>
+              <th>Select</th>
               <th>Thread</th>
               <th>Status</th>
               <th>Project</th>

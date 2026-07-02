@@ -10,6 +10,10 @@ const elements = {
   visibilityRefresh: document.querySelector("#visibility-refresh"),
   threads: document.querySelector("#threads"),
   resultCount: document.querySelector("#result-count"),
+  selectedCount: document.querySelector("#selected-count"),
+  restorePlan: document.querySelector("#restore-plan"),
+  restorePlanMeta: document.querySelector("#restore-plan-meta"),
+  restorePlanOutput: document.querySelector("#restore-plan-output"),
   prevPage: document.querySelector("#prev-page"),
   nextPage: document.querySelector("#next-page"),
   refresh: document.querySelector("#refresh"),
@@ -22,6 +26,7 @@ const elements = {
 let scan = null;
 let filterTimer = null;
 let offset = 0;
+const selectedThreadIds = new Set();
 const limit = 100;
 
 elements.refresh.addEventListener("click", async () => {
@@ -30,6 +35,10 @@ elements.refresh.addEventListener("click", async () => {
 
 elements.visibilityRefresh.addEventListener("click", async () => {
   await loadVisibility();
+});
+
+elements.restorePlan.addEventListener("click", async () => {
+  await loadRestorePlan();
 });
 
 for (const input of [elements.title, elements.content, elements.cwd, elements.status]) {
@@ -86,6 +95,7 @@ async function loadThreads() {
   const data = await fetchJson(`/api/threads?${params.toString()}`);
   renderThreads(data.threads);
   renderPagination(data);
+  renderSelectionState();
 }
 
 async function loadVisibility() {
@@ -175,7 +185,7 @@ function renderThreads(threads) {
   if (threads.length === 0) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 5;
+    cell.colSpan = 6;
     cell.textContent = "No matching threads.";
     row.append(cell);
     elements.threads.replaceChildren(row);
@@ -186,6 +196,7 @@ function renderThreads(threads) {
     ...threads.map((thread) => {
       const row = document.createElement("tr");
       row.append(
+        cell(selectionCheckbox(thread)),
         cell(threadCell(thread)),
         cell(statusBadge(thread.restoreStatus)),
         cell(pathText(thread.cwd || "No project path")),
@@ -197,6 +208,102 @@ function renderThreads(threads) {
   );
 }
 
+async function loadRestorePlan() {
+  const ids = Array.from(selectedThreadIds);
+  if (ids.length === 0) {
+    return;
+  }
+
+  elements.restorePlan.disabled = true;
+  elements.restorePlan.textContent = "Planning...";
+  elements.restorePlanMeta.textContent = "Building read-only dry-run restore plan...";
+  try {
+    const plan = await fetchJson("/api/restore/plan", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Codex-Archiver-Intent": "local-api",
+      },
+      body: JSON.stringify({ selectedThreadIds: ids }),
+    });
+    renderRestorePlan(plan);
+  } catch (error) {
+    elements.restorePlanMeta.textContent = "Restore planning failed.";
+    elements.restorePlanOutput.replaceChildren(
+      restoreNote(error instanceof Error ? error.message : String(error)),
+    );
+  } finally {
+    elements.restorePlan.textContent = "Plan restore";
+    renderSelectionState();
+  }
+}
+
+function renderRestorePlan(plan) {
+  elements.restorePlanMeta.textContent = `Dry run generated ${new Date(
+    plan.generatedAt,
+  ).toLocaleString()}. No backups or Codex mutations were performed.`;
+  elements.restorePlanOutput.replaceChildren(
+    restoreSummary(plan.impactPreview),
+    restoreNote(
+      `Future apply would require backups under ${plan.backupPreview.backupRootPattern}. This dry run created none.`,
+    ),
+    ...plan.items.map(restorePlanItem),
+  );
+}
+
+function restoreSummary(impact) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "restore-summary";
+  wrapper.append(
+    visibilityMetric("Selected", impact.selectedCount),
+    visibilityMetric("Future apply", impact.futureApplyCount),
+    visibilityMetric("Diagnostics", impact.diagnosticOnlyCount),
+    visibilityMetric("Blocked", impact.blockedCount),
+    visibilityMetric("No-op/rejected", impact.noopCount + impact.rejectedCount),
+  );
+  return wrapper;
+}
+
+function restorePlanItem(item) {
+  const wrapper = document.createElement("article");
+  wrapper.className = "restore-item";
+  const header = document.createElement("div");
+  header.className = "restore-item-header";
+  const title = document.createElement("h3");
+  title.textContent = item.title || item.threadId;
+  const badge = document.createElement("span");
+  badge.className = `classification ${item.actionability}`;
+  badge.textContent = item.actionability;
+  header.append(title, badge);
+  wrapper.append(header);
+  wrapper.append(reasonList("Reasons", item.reasons));
+  if (item.futureActions.length > 0) {
+    wrapper.append(reasonList("Future actions", item.futureActions));
+  }
+  if (item.backupPreview.length > 0) {
+    wrapper.append(reasonList("Backup preview", item.backupPreview.slice(0, 6)));
+  }
+  return wrapper;
+}
+
+function reasonList(label, values) {
+  const list = document.createElement("ul");
+  list.setAttribute("aria-label", label);
+  for (const value of values) {
+    const item = document.createElement("li");
+    item.textContent = value;
+    list.append(item);
+  }
+  return list;
+}
+
+function restoreNote(text) {
+  const note = document.createElement("div");
+  note.className = "restore-note";
+  note.textContent = text;
+  return note;
+}
+
 function renderPagination(data) {
   const start = data.totalMatches === 0 ? 0 : data.offset + 1;
   const end = Math.min(data.offset + data.threads.length, data.totalMatches);
@@ -205,6 +312,28 @@ function renderPagination(data) {
   )} matching threads`;
   elements.prevPage.disabled = data.offset <= 0;
   elements.nextPage.disabled = data.offset + data.limit >= data.totalMatches;
+}
+
+function selectionCheckbox(thread) {
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = selectedThreadIds.has(thread.id);
+  checkbox.setAttribute("aria-label", `Select ${thread.title || thread.id}`);
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) {
+      selectedThreadIds.add(thread.id);
+    } else {
+      selectedThreadIds.delete(thread.id);
+    }
+    renderSelectionState();
+  });
+  return checkbox;
+}
+
+function renderSelectionState() {
+  const selectedCount = selectedThreadIds.size;
+  elements.selectedCount.textContent = `${number(selectedCount)} selected`;
+  elements.restorePlan.disabled = selectedCount === 0;
 }
 
 function threadCell(thread) {

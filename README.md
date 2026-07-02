@@ -4,7 +4,7 @@ A local browser and restoration tool for old, archived, hidden, and hard-to-find
 
 ## Status
 
-Early scaffold. The current implementation is read-only: it scans local Codex storage and serves a browser UI, but it does not restore or mutate threads yet.
+Early scaffold. The current implementation is read-only: it scans local Codex storage, serves a browser UI, diagnoses visibility, and creates dry-run restore plans, but it does not restore or mutate threads yet.
 
 ## Usage
 
@@ -23,6 +23,8 @@ http://127.0.0.1:8976
 The first screen shows summary badges for total threads, total projects, and active indexed threads, followed by separate filters for thread names, content previews, project paths, and restoration status.
 
 The web UI also includes a visibility diagnostics panel. It compares the local scanned/indexed thread universe with best-effort Codex visibility surfaces when they are available, without mutating `~/.codex`.
+
+The browser also lets you select specific threads and generate a dry-run restore plan. The plan previews classifications, reasons, future backup targets, and future mutation targets, but there is no apply/restore button yet.
 
 ## CLI
 
@@ -101,6 +103,19 @@ node dist/cli.js diagnose visibility --app-server-url http://127.0.0.1:PORT
 The app-server URL may also be set with `CODEX_ARCHIVER_CODEX_APP_SERVER_URL`.
 The app-server `/thread/list` parser accepts common `payload` / `data` / `result` envelopes, several thread-id aliases, and bounded cursor pagination. App-server visibility uses exact thread-id matches only. Shape mismatches, malformed thread objects, repeated cursors, page-limit stops, unavailable servers, and timeouts are reported as probe status or warnings instead of failing the full diagnostics report.
 
+## Restore Planning
+
+Create an explicit dry-run restore plan for selected thread ids with:
+
+```bash
+node dist/cli.js restore plan THREAD_ID...
+node dist/cli.js restore plan --ids thread-a,thread-b --json
+```
+
+The planner classifies selected threads as archived SQLite, JSONL-only archived, UI-hidden active, missing source, already active, not found, or unsupported. It includes impact and backup previews for a future apply phase, but it never creates backups or mutates `~/.codex`.
+
+See [docs/restore-planning.md](docs/restore-planning.md) for the `M3-RESTORE-PLAN` contract, CLI/API details, and safety boundaries.
+
 ## CI
 
 Pull requests run GitHub Actions CI with:
@@ -111,4 +126,4 @@ Pull requests run GitHub Actions CI with:
 
 ## Safety
 
-This first version is intentionally read-only. Restore planning and backup-backed mutation will be added in later PRs.
+This version is intentionally read-only with respect to `~/.codex`. Backup-backed mutation will be added only in a later restore apply phase.

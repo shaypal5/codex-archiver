@@ -134,3 +134,79 @@ export interface VisibilityDiagnostics {
   summary: VisibilitySummary;
   threads: ThreadVisibilityRecord[];
 }
+
+export type RestorePlanClassification =
+  | "archived-sqlite-thread"
+  | "jsonl-only-archived-thread"
+  | "ui-hidden-active-thread"
+  | "missing-rollout-source"
+  | "already-active"
+  | "not-found"
+  | "unsupported";
+
+export type RestorePlanActionability =
+  | "future-apply"
+  | "diagnostic-only"
+  | "blocked"
+  | "no-op"
+  | "rejected";
+
+export interface RestorePlanEvidence {
+  threadFound: boolean;
+  restoreStatus: RestoreStatus | null;
+  storageKind: StorageKind | null;
+  archived: boolean | null;
+  rolloutPath: string | null;
+  sourcePaths: string[];
+  existsOnDisk: boolean | null;
+  hasActiveRolloutPath: boolean;
+  hasArchivedRolloutPath: boolean;
+  sqlitePresent: boolean;
+}
+
+export interface RestorePlanItem {
+  threadId: string;
+  title: string | null;
+  cwd: string | null;
+  classification: RestorePlanClassification;
+  actionability: RestorePlanActionability;
+  readOnly: true;
+  reasons: string[];
+  evidence: RestorePlanEvidence;
+  futureActions: string[];
+  backupPreview: string[];
+  mutationPreview: string[];
+}
+
+export interface RestorePlanImpactPreview {
+  selectedCount: number;
+  futureApplyCount: number;
+  diagnosticOnlyCount: number;
+  blockedCount: number;
+  noopCount: number;
+  rejectedCount: number;
+  wouldMutateCodexHome: boolean;
+  wouldCreateBackups: boolean;
+  mutationTargetsIfApplied: string[];
+}
+
+export interface RestorePlanBackupPreview {
+  requiredBeforeApply: boolean;
+  createdByThisPlan: false;
+  backupRootPattern: string;
+  targetsIfApplied: string[];
+  notes: string[];
+}
+
+export interface RestorePlan {
+  codexHome: string;
+  indexPath: string;
+  generatedAt: string;
+  selectedThreadIds: string[];
+  readOnly: true;
+  mutationAllowed: false;
+  diagnostics: Diagnostic[];
+  impactPreview: RestorePlanImpactPreview;
+  backupPreview: RestorePlanBackupPreview;
+  items: RestorePlanItem[];
+}

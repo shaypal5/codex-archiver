@@ -192,9 +192,16 @@ h2 {
   font-size: 13px;
 }
 
-.pager {
+.result-actions {
+  align-items: center;
   display: flex;
   gap: 8px;
+}
+
+#selected-count {
+  color: #565951;
+  font-size: 13px;
+  min-width: 82px;
 }
 
 button:disabled {
@@ -239,6 +246,97 @@ button:disabled {
 .probe-warnings {
   margin: 4px 0 0;
   padding-left: 18px;
+}
+
+.restore-panel {
+  background: white;
+  border: 1px solid #dedfd8;
+  border-radius: 8px;
+  margin-bottom: 18px;
+  padding: 16px;
+}
+
+#restore-plan-meta {
+  color: #686b63;
+  font-size: 13px;
+}
+
+.restore-plan-output {
+  display: grid;
+  gap: 10px;
+}
+
+.restore-summary {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.restore-item {
+  border: 1px solid #e3e4de;
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.restore-item-header {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.restore-item h3 {
+  font-size: 14px;
+  line-height: 1.25;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.restore-item ul {
+  color: #4c5049;
+  font-size: 13px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.restore-note {
+  background: #f7f7f4;
+  border: 1px solid #e3e4de;
+  border-radius: 6px;
+  color: #4c5049;
+  font-size: 13px;
+  padding: 10px;
+}
+
+.classification {
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 8px;
+}
+
+.classification.future-apply {
+  background: #dceee8;
+  color: #245448;
+}
+
+.classification.diagnostic-only {
+  background: #fff0cc;
+  color: #73500d;
+}
+
+.classification.blocked,
+.classification.rejected {
+  background: #ffe7e0;
+  color: #8a2b17;
+}
+
+.classification.no-op {
+  background: #f1f1ee;
+  color: #575a54;
 }
 
 .table-wrap {
@@ -337,12 +435,14 @@ td {
   .filters,
   .section-title,
   .visibility-grid,
+  .restore-summary,
   .results-bar {
     grid-template-columns: 1fr;
   }
 
   .section-title,
-  .results-bar {
+  .results-bar,
+  .result-actions {
     align-items: stretch;
     display: grid;
   }

@@ -6,6 +6,7 @@ import {
   searchThreads,
 } from "./indexer.js";
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
+import { createRestorePlan } from "./restore.js";
 import { scanCodexStorage } from "./scanner.js";
 import { serve } from "./server.js";
 import { diagnoseVisibility } from "./visibility.js";
@@ -110,6 +111,36 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.command === "restore") {
+    const action = args.positionals[0] ?? "help";
+    const codexHome = stringFlag(args, "codex-home") ?? defaultCodexHome();
+    const indexPath = stringFlag(args, "index-path") ?? defaultIndexPath();
+
+    if (action === "plan") {
+      const selectedThreadIds = selectedIdsFromArgs(args);
+      if (selectedThreadIds.length === 0) {
+        throw new UsageError("restore plan requires at least one selected thread id.");
+      }
+      console.log(
+        JSON.stringify(
+          await createRestorePlan({
+            codexHome,
+            indexPath,
+            selectedThreadIds,
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    console.error(`Unknown restore action: ${action}`);
+    printHelp();
+    process.exit(1);
+    return;
+  }
+
   printHelp();
   process.exit(args.command === "help" ? 0 : 1);
 }
@@ -178,6 +209,16 @@ function parseStatusFlag(value: string | null): RestoreStatus | "all" {
   throw new UsageError(`Invalid status: ${value}`);
 }
 
+function selectedIdsFromArgs(args: ParsedArgs): string[] {
+  const positionalIds = args.positionals.slice(1);
+  const idsFlag = stringFlag(args, "ids")
+    ?.split(",")
+    .map((value) => value.trim())
+    .filter(Boolean) ?? [];
+  const threadIdFlag = stringFlag(args, "thread-id");
+  return [...positionalIds, ...idsFlag, ...(threadIdFlag ? [threadIdFlag] : [])];
+}
+
 function printHelp(): void {
   console.log(`codex-archiver
 
@@ -189,6 +230,7 @@ Usage:
   codex-archiver index search [--title text] [--content text] [--cwd path] [--status active] [--limit 100] [--offset 0]
   codex-archiver index clear [--index-path ~/.cache/codex-archiver/index.sqlite]
   codex-archiver diagnose visibility [--timeout-ms 2500] [--no-codex-resume] [--app-server-url http://127.0.0.1:PORT]
+  codex-archiver restore plan THREAD_ID... [--ids id-a,id-b] [--codex-home ~/.codex] [--index-path ~/.cache/codex-archiver/index.sqlite] [--json]
 
 Commands:
   serve   Start the local read-only browser.
@@ -196,6 +238,8 @@ Commands:
   index   Manage and query the persistent local search index.
   diagnose
           Run read-only diagnostics that compare local/indexed threads with best-effort Codex visibility surfaces.
+  restore
+          Create explicit dry-run restore plans. Planning is read-only and never mutates ~/.codex.
 `);
 }
 
