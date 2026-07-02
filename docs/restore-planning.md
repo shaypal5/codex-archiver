@@ -6,11 +6,15 @@ Current extension: `M3-PREFLIGHT-BACKUP-PREVIEW`
 
 Apply extension: `M4-RESTORE-APPLY-BACKUPS`
 
+Undo extension: `M4-RESTORE-UNDO-BACKUPS`
+
 Parent milestones: `M3: Restore planning and safety checks`; `M4: Backup-backed restoration`
 
 `codex-archiver restore plan` creates an explicit dry-run plan for selected thread ids. It is read-only with respect to `~/.codex`: it does not create backups, edit SQLite, rewrite `session_index.jsonl`, move rollout files, or apply restore changes.
 
 `codex-archiver restore apply` is the first intentionally mutating restore path. It is limited to archived SQLite threads with existing archived JSONL evidence. It recomputes the plan immediately before applying, requires the confirmation token or phrase from the plan, blocks on any non-passing preflight check, creates timestamped backups, mutates with SQLite transaction semantics where possible, writes a machine-readable report, rebuilds the derived search index, and verifies by rescanning.
+
+`codex-archiver restore undo` rolls back from an explicit PR #7 restore apply backup/report artifact. It previews by default, validates the apply report and backup manifest before mutation, requires the generated undo confirmation token or phrase to apply, creates a new rollback safety backup of current targets, restores backed files with temporary-file rename, removes apply-created active-session files recorded in the apply report, rebuilds the derived search index, and writes a machine-readable undo report.
 
 ## CLI
 
@@ -21,6 +25,10 @@ node dist/cli.js restore plan THREAD_ID --process-check strict
 node dist/cli.js restore plan THREAD_ID --skip-process-check
 node dist/cli.js restore apply THREAD_ID --confirm-token restore-...
 node dist/cli.js restore apply THREAD_ID --confirm-phrase "apply restore restore-..."
+node dist/cli.js restore undo --report /path/to/restore-report.json
+node dist/cli.js restore undo --backup-root /path/to/backup-root
+node dist/cli.js restore undo --report /path/to/restore-report.json --confirm-token undo-...
+node dist/cli.js restore undo --report /path/to/restore-report.json --confirm-phrase "undo restore undo-..."
 ```
 
 Useful flags:
@@ -33,6 +41,10 @@ Useful flags:
 - `--json`: accepted for explicit machine-readable CLI usage. Output is always JSON.
 - `--confirm-token restore-...`: required for apply unless `--confirm-phrase` is used. The token is shown in `reportPreview.confirmationToken`.
 - `--confirm-phrase "apply restore restore-..."`: equivalent apply confirmation phrase shown in `reportPreview.confirmationPhrase`.
+- `--report /path/to/restore-report.json`: explicit restore apply report for undo preview/apply.
+- `--backup-root /path/to/backup-root`: explicit backup root for undo; the report is resolved as `<backup-root>/restore-report.json`.
+- `--confirm-token undo-...`: required for undo apply unless `--confirm-phrase` is used. Without confirmation, undo returns a dry-run preview and mutates nothing.
+- `--confirm-phrase "undo restore undo-..."`: equivalent undo confirmation phrase shown in the undo preview.
 
 Both plan and apply require at least one selected thread id. There are no broad or implicit restore batches.
 
@@ -43,6 +55,7 @@ The local web app exposes:
 ```text
 POST /api/restore/plan
 POST /api/restore/apply
+POST /api/restore/undo
 ```
 
 Request body:
@@ -57,6 +70,7 @@ Request body:
 
 `processCheck` may be `warn`, `strict`, or `skip`. `skipProcessCheck: true` is also accepted for test and CI callers.
 `confirmationToken` or `confirmationPhrase` is required by `/api/restore/apply`; `/api/restore/plan` ignores those fields.
+`/api/restore/undo` accepts `reportPath` or `backupRoot` plus the same process-check and confirmation fields. Without confirmation it returns a dry-run undo preview. With confirmation it applies rollback only after validation and preflight pass.
 
 Because this is a non-GET local API route, requests must include:
 
@@ -134,3 +148,26 @@ The report includes:
 - next user steps and explicit limitations
 
 If confirmation is invalid or preflight blocks, apply writes a blocked report but does not mutate `~/.codex` or create file backups. If a failure happens after file changes but before the SQLite transaction completes, apply attempts best-effort rollback of copied active-session files and `session_index.jsonl` before writing the failure report.
+
+## Undo Report
+
+M4 undo writes a report only when confirmed rollback starts:
+
+```text
+<backup-root>/rollback-safety/restore-undo-<timestamp>/rollback-safety-manifest.json
+<backup-root>/rollback-safety/restore-undo-<timestamp>/restore-undo-report.json
+```
+
+The undo preview/report includes:
+
+- recognized source apply report metadata and selected thread ids
+- validation for report schema, manifest schema, backup paths, target restore paths, backup sizes, and backup hashes
+- preflight process checks
+- target actions: `restore-file`, `remove-created-file`, or `skip-missing-original`
+- generated undo confirmation token and phrase
+- rollback safety backup manifest for current target files
+- restored/removed file results
+- verification from restored-file hash checks and a Codex storage rescan
+- next user steps and limitations
+
+Undo rejects mutation when report or manifest validation fails, when backup files are missing or hash/size metadata does not match, when target paths leave the intended Codex home or configured search index, when symlink escapes are detected, or when Codex process preflight does not pass. Dry-run preview is still available for a valid artifact even when process preflight would block confirmed mutation.

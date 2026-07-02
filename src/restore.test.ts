@@ -5,7 +5,7 @@ import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { applyRestorePlan, createRestorePlan } from "./restore.js";
+import { applyRestorePlan, createRestorePlan, undoRestoreApply } from "./restore.js";
 import { createRequestHandler } from "./server.js";
 
 test("restore planner classifies explicit selections without mutating codex home", async (t) => {
@@ -553,6 +553,262 @@ test("restore apply API requires local intent and confirmation before mutation",
   assert.equal(report.result?.status, "succeeded");
   assert.equal(report.verification?.status, "succeeded");
 });
+
+test("restore undo previews apply report without mutation and requires confirmation", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore undo tests");
+    return;
+  }
+
+  const { fixture, applyReport } = await createAppliedFixture(t);
+  const afterApply = await snapshotFiles(fixture.codexHome);
+  const preview = await undoRestoreApply({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    reportPath: applyReport.result.reportPath,
+    processDetector: noCodexProcesses,
+    now: new Date("2026-07-02T13:00:00.000Z"),
+  });
+  const afterPreview = await snapshotFiles(fixture.codexHome);
+  const wrongConfirmation = await undoRestoreApply({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    reportPath: applyReport.result.reportPath,
+    confirmationToken: "wrong-token",
+    processDetector: noCodexProcesses,
+    now: new Date("2026-07-02T13:00:00.000Z"),
+  });
+  const afterWrongConfirmation = await snapshotFiles(fixture.codexHome);
+
+  assert.deepEqual(afterPreview, afterApply);
+  assert.deepEqual(afterWrongConfirmation, afterApply);
+  assert.equal(preview.result.status, "preview");
+  assert.equal(preview.readOnly, true);
+  assert.equal(preview.safetyBackup, null);
+  assert.match(preview.confirmationToken, /^undo-[a-f0-9]{16}$/);
+  assert(preview.targets.some((target) => target.sourcePath.endsWith("state_5.sqlite") && target.action === "restore-file"));
+  assert(preview.targets.some((target) => target.sourcePath.endsWith("sessions/archived.jsonl") && target.action === "remove-created-file"));
+  assert.equal(wrongConfirmation.result.status, "preview");
+});
+
+test("restore undo creates safety backup, restores backed files, removes apply-created file, reports, and verifies", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore undo tests");
+    return;
+  }
+
+  const { fixture, beforeApply, applyReport } = await createAppliedFixture(t);
+  const preview = await undoRestoreApply({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    reportPath: applyReport.result.reportPath,
+    processDetector: noCodexProcesses,
+    now: new Date("2026-07-02T13:10:00.000Z"),
+  });
+  const report = await undoRestoreApply({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    reportPath: applyReport.result.reportPath,
+    confirmationToken: preview.confirmationToken,
+    processDetector: noCodexProcesses,
+    now: new Date("2026-07-02T13:10:00.000Z"),
+  });
+  const afterUndo = await snapshotFiles(fixture.codexHome);
+
+  assert.deepEqual(afterUndo, beforeApply);
+  assert.equal(report.result.status, "succeeded");
+  assert.equal(report.verification.status, "succeeded");
+  assert(report.safetyBackup);
+  assert(await exists(report.safetyBackup.manifestPath));
+  assert(await exists(report.result.reportPath));
+  assert(report.restoredFiles.some((file) => file.sourcePath.endsWith("state_5.sqlite") && file.status === "restored"));
+  assert(report.restoredFiles.some((file) => file.sourcePath.endsWith("sessions/archived.jsonl") && file.status === "restored"));
+  const safetyState = report.safetyBackup.targets.find((target) => target.sourcePath.endsWith("state_5.sqlite"));
+  assert(safetyState);
+  assert(await exists(safetyState.backupPath));
+  assert.equal(await exists(path.join(fixture.codexHome, "sessions", "archived.jsonl")), false);
+  assert.equal(readSqliteRows(fixture.codexHome, "archived-thread")[0]?.archived, 1);
+});
+
+test("restore undo rejects manifest path traversal and bad backup hashes without mutation", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore undo tests");
+    return;
+  }
+
+  const traversal = await createAppliedFixture(t);
+  const traversalSnapshot = await snapshotFiles(traversal.fixture.codexHome);
+  const traversalManifest = JSON.parse(
+    await readFile(traversal.applyReport.backupManifest.manifestPath, "utf8"),
+  ) as { targets: Array<{ sourcePath: string }> };
+  traversalManifest.targets[0].sourcePath = path.join(traversal.fixture.root, "..", "outside.sqlite");
+  await writeFile(traversal.applyReport.backupManifest.manifestPath, `${JSON.stringify(traversalManifest, null, 2)}\n`);
+  const traversalReport = await undoRestoreApply({
+    codexHome: traversal.fixture.codexHome,
+    indexPath: traversal.fixture.indexPath,
+    reportPath: traversal.applyReport.result.reportPath,
+    confirmationToken: "undo-anything",
+    processDetector: noCodexProcesses,
+  });
+
+  assert.equal(traversalReport.result.status, "blocked");
+  assert.match(traversalReport.result.message, /validation blocked/);
+  assert.deepEqual(await snapshotFiles(traversal.fixture.codexHome), traversalSnapshot);
+
+  const badHash = await createAppliedFixture(t);
+  const badHashSnapshot = await snapshotFiles(badHash.fixture.codexHome);
+  const stateBackup = badHash.applyReport.backupManifest.targets.find((target) => target.sourcePath.endsWith("state_5.sqlite"));
+  assert(stateBackup);
+  await writeFile(stateBackup.backupPath, "tampered backup");
+  const badHashReport = await undoRestoreApply({
+    codexHome: badHash.fixture.codexHome,
+    indexPath: badHash.fixture.indexPath,
+    reportPath: badHash.applyReport.result.reportPath,
+    confirmationToken: "undo-anything",
+    processDetector: noCodexProcesses,
+  });
+
+  assert.equal(badHashReport.result.status, "blocked");
+  assert(badHashReport.validation.checks.some((check) => check.id === "undo-backup-integrity" && check.status === "failed"));
+  assert.deepEqual(await snapshotFiles(badHash.fixture.codexHome), badHashSnapshot);
+});
+
+test("restore undo CLI previews from backup root and is confirmation-gated", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore undo CLI tests");
+    return;
+  }
+
+  const { fixture, applyReport } = await createAppliedFixture(t);
+  const afterApply = await snapshotFiles(fixture.codexHome);
+  const stdout = execFileSync(
+    process.execPath,
+    [
+      path.resolve("dist/cli.js"),
+      "restore",
+      "undo",
+      "--backup-root",
+      applyReport.result.backupRoot,
+      "--codex-home",
+      fixture.codexHome,
+      "--index-path",
+      fixture.indexPath,
+      "--skip-process-check",
+    ],
+    { encoding: "utf8" },
+  );
+  const parsed = JSON.parse(stdout) as { result?: { status: string }; confirmationToken?: string };
+
+  assert.equal(parsed.result?.status, "preview");
+  assert.match(parsed.confirmationToken ?? "", /^undo-[a-f0-9]{16}$/);
+  assert.deepEqual(await snapshotFiles(fixture.codexHome), afterApply);
+});
+
+test("restore undo API requires local intent and confirmation before mutation", async (t) => {
+  if (!hasSqliteCli()) {
+    t.skip("sqlite3 CLI is required for restore undo API tests");
+    return;
+  }
+
+  const { fixture, beforeApply, applyReport } = await createAppliedFixture(t);
+  const server = createServer(
+    createRequestHandler({
+      codexHome: fixture.codexHome,
+      indexPath: fixture.indexPath,
+      processDetector: noCodexProcesses,
+    }),
+  );
+  t.after(async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const body = JSON.stringify({ reportPath: applyReport.result.reportPath, processCheck: "warn" });
+
+  const missingIntent = await fetch(`${baseUrl}/api/restore/undo`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  assert.equal(missingIntent.status, 403);
+
+  const previewResponse = await fetch(`${baseUrl}/api/restore/undo`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Codex-Archiver-Intent": "local-api",
+    },
+    body,
+  });
+  assert.equal(previewResponse.status, 200);
+  const preview = (await previewResponse.json()) as { result?: { status: string }; confirmationToken?: string };
+  assert.equal(preview.result?.status, "preview");
+
+  const accepted = await fetch(`${baseUrl}/api/restore/undo`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Codex-Archiver-Intent": "local-api",
+      Origin: "http://127.0.0.1",
+    },
+    body: JSON.stringify({
+      reportPath: applyReport.result.reportPath,
+      processCheck: "warn",
+      confirmationToken: preview.confirmationToken,
+    }),
+  });
+  assert.equal(accepted.status, 200);
+  const report = (await accepted.json()) as { result?: { status: string }; verification?: { status: string } };
+  assert.equal(report.result?.status, "succeeded");
+  assert.equal(report.verification?.status, "succeeded");
+  assert.deepEqual(await snapshotFiles(fixture.codexHome), beforeApply);
+});
+
+async function createAppliedFixture(
+  t: TestContext,
+): Promise<{
+  fixture: { root: string; codexHome: string; indexPath: string };
+  beforeApply: Record<string, string>;
+  applyReport: Awaited<ReturnType<typeof applyRestorePlan>>;
+}> {
+  const fixture = await createFixture(t);
+  const beforeApply = await snapshotFiles(fixture.codexHome);
+  const plan = await createRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    processDetector: noCodexProcesses,
+    now: new Date("2026-07-02T12:30:00.000Z"),
+  });
+  const applyReport = await applyRestorePlan({
+    codexHome: fixture.codexHome,
+    indexPath: fixture.indexPath,
+    selectedThreadIds: ["archived-thread"],
+    confirmationToken: plan.reportPreview.confirmationToken,
+    processDetector: noCodexProcesses,
+    now: new Date("2026-07-02T12:30:00.000Z"),
+  });
+  assert.equal(applyReport.result.status, "succeeded");
+  return { fixture, beforeApply, applyReport };
+}
+
+async function noCodexProcesses(): Promise<{
+  status: "checked";
+  processes: [];
+  evidence: string[];
+}> {
+  return {
+    status: "checked",
+    processes: [],
+    evidence: ["mock process table checked"],
+  };
+}
 
 async function createFixture(
   t: TestContext,

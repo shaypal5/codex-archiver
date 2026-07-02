@@ -9,7 +9,7 @@ import {
   searchThreads,
 } from "./indexer.js";
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
-import { applyRestorePlan, createRestorePlan, type CodexProcessDetector } from "./restore.js";
+import { applyRestorePlan, createRestorePlan, undoRestoreApply, type CodexProcessDetector } from "./restore.js";
 import { diagnoseVisibility } from "./visibility.js";
 import type { RestoreProcessCheckMode, ScanResult, SearchIndexMeta, ThreadQuery } from "./types.js";
 
@@ -114,6 +114,33 @@ export function createRequestHandler(options: {
             processCheckMode: applyOptions.processCheckMode,
             confirmationToken: applyOptions.confirmationToken,
             confirmationPhrase: applyOptions.confirmationPhrase,
+            processDetector,
+          }),
+        );
+      }
+
+      if (url.pathname === "/api/restore/undo") {
+        if (request.method !== "POST") {
+          return sendJson(response, { error: "Method not allowed" }, 405);
+        }
+        const body = await readJsonBody(request);
+        const undoOptions = restoreUndoOptionsFromBody(body);
+        if (!undoOptions.reportPath && !undoOptions.backupRoot) {
+          return sendJson(response, { error: "reportPath or backupRoot is required." }, 400);
+        }
+        if (undoOptions.processCheckMode === "invalid") {
+          return sendJson(response, { error: "processCheck must be warn, strict, or skip." }, 400);
+        }
+        return sendJson(
+          response,
+          await undoRestoreApply({
+            codexHome,
+            indexPath,
+            reportPath: undoOptions.reportPath,
+            backupRoot: undoOptions.backupRoot,
+            processCheckMode: undoOptions.processCheckMode,
+            confirmationToken: undoOptions.confirmationToken,
+            confirmationPhrase: undoOptions.confirmationPhrase,
             processDetector,
           }),
         );
@@ -289,6 +316,60 @@ function restoreApplyOptionsFromBody(body: unknown): {
     confirmationToken: typeof token === "string" ? token : undefined,
     confirmationPhrase: typeof phrase === "string" ? phrase : undefined,
   };
+}
+
+function restoreUndoOptionsFromBody(body: unknown): {
+  reportPath?: string;
+  backupRoot?: string;
+  processCheckMode: RestoreProcessCheckMode | "invalid";
+  confirmationToken?: string;
+  confirmationPhrase?: string;
+} {
+  const processCheckMode = processCheckModeFromBody(body);
+  if (typeof body !== "object" || body === null) {
+    return { processCheckMode };
+  }
+  const typed = body as {
+    reportPath?: unknown;
+    report?: unknown;
+    backupRoot?: unknown;
+    confirmationToken?: unknown;
+    confirmToken?: unknown;
+    confirmationPhrase?: unknown;
+    confirmPhrase?: unknown;
+  };
+  const token = typed.confirmationToken ?? typed.confirmToken;
+  const phrase = typed.confirmationPhrase ?? typed.confirmPhrase;
+  const reportPath = typed.reportPath ?? typed.report;
+  return {
+    reportPath: typeof reportPath === "string" ? reportPath : undefined,
+    backupRoot: typeof typed.backupRoot === "string" ? typed.backupRoot : undefined,
+    processCheckMode,
+    confirmationToken: typeof token === "string" ? token : undefined,
+    confirmationPhrase: typeof phrase === "string" ? phrase : undefined,
+  };
+}
+
+function processCheckModeFromBody(body: unknown): RestoreProcessCheckMode | "invalid" {
+  if (typeof body !== "object" || body === null) {
+    return "warn";
+  }
+  const typed = body as {
+    processCheck?: unknown;
+    processCheckMode?: unknown;
+    skipProcessCheck?: unknown;
+  };
+  if (typed.skipProcessCheck === true) {
+    return "skip";
+  }
+  const processCheck = typed.processCheckMode ?? typed.processCheck;
+  if (processCheck === undefined || processCheck === null) {
+    return "warn";
+  }
+  if (processCheck === "warn" || processCheck === "strict" || processCheck === "skip") {
+    return processCheck;
+  }
+  return "invalid";
 }
 
 function contentType(filePath: string): string {
