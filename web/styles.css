@@ -272,6 +272,55 @@ button:disabled {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
+.preflight {
+  border: 1px solid #e3e4de;
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.preflight-header,
+.preflight-check {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.preflight-header span,
+.preflight-check span {
+  color: #565951;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.preflight-check {
+  border-radius: 6px;
+  font-size: 13px;
+  padding: 9px 10px;
+}
+
+.preflight-check p {
+  color: #4c5049;
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+}
+
+.preflight-check.passed {
+  background: #edf4f2;
+}
+
+.preflight-check.warning,
+.preflight-check.unknown {
+  background: #fff4d8;
+}
+
+.preflight-check.failed {
+  background: #ffe7e0;
+}
+
 .restore-item {
   border: 1px solid #e3e4de;
   border-radius: 6px;

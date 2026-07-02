@@ -151,6 +151,17 @@ export type RestorePlanActionability =
   | "no-op"
   | "rejected";
 
+export type RestorePreflightStatus =
+  | "passed"
+  | "warning"
+  | "failed"
+  | "unknown";
+
+export type RestoreProcessCheckMode =
+  | "warn"
+  | "strict"
+  | "skip";
+
 export interface RestorePlanEvidence {
   threadFound: boolean;
   restoreStatus: RestoreStatus | null;
@@ -176,6 +187,30 @@ export interface RestorePlanItem {
   futureActions: string[];
   backupPreview: string[];
   mutationPreview: string[];
+  plannedPaths: RestorePlanPlannedPath[];
+  validations: RestorePlanValidation[];
+}
+
+export interface RestorePlanPlannedPath {
+  kind:
+    | "state-db"
+    | "session-index"
+    | "source-rollout"
+    | "archived-source-rollout"
+    | "active-session-target"
+    | "archive-session-target"
+    | "search-index";
+  path: string;
+  exists: boolean | null;
+  requiredBeforeApply: boolean;
+}
+
+export interface RestorePlanValidation {
+  id: string;
+  status: RestorePreflightStatus;
+  message: string;
+  evidence: string[];
+  remediation: string;
 }
 
 export interface RestorePlanImpactPreview {
@@ -194,7 +229,57 @@ export interface RestorePlanBackupPreview {
   requiredBeforeApply: boolean;
   createdByThisPlan: false;
   backupRootPattern: string;
+  plannedBackupRoot: string;
   targetsIfApplied: string[];
+  targets: RestorePlanBackupTarget[];
+  notes: string[];
+}
+
+export interface RestorePlanBackupTarget {
+  sourcePath: string;
+  backupPath: string;
+  kind: RestorePlanPlannedPath["kind"];
+  exists: boolean;
+  sizeBytes: number | null;
+  mtimeMs: number | null;
+  sha256: string | null;
+  hashStatus: "sha256" | "skipped-large-file" | "missing" | "unavailable";
+  requiredBeforeApply: boolean;
+}
+
+export interface RestorePlanPreflightSummary {
+  passed: number;
+  warning: number;
+  failed: number;
+  unknown: number;
+  hasFailures: boolean;
+  hasWarnings: boolean;
+}
+
+export interface RestorePlanPreflight {
+  processCheckMode: RestoreProcessCheckMode;
+  checks: RestorePlanPreflightCheck[];
+  summary: RestorePlanPreflightSummary;
+}
+
+export interface RestorePlanPreflightCheck {
+  id: string;
+  label: string;
+  status: RestorePreflightStatus;
+  blocking: boolean;
+  evidence: string[];
+  remediation: string;
+}
+
+export interface RestorePlanReportPreview {
+  schemaVersion: 1;
+  reportType: "restore-apply-report";
+  readOnlyPreview: true;
+  wouldWriteReport: false;
+  plannedReportPath: string;
+  requiredFields: string[];
+  itemFields: string[];
+  undoFields: string[];
   notes: string[];
 }
 
@@ -207,6 +292,8 @@ export interface RestorePlan {
   mutationAllowed: false;
   diagnostics: Diagnostic[];
   impactPreview: RestorePlanImpactPreview;
+  preflight: RestorePlanPreflight;
   backupPreview: RestorePlanBackupPreview;
+  reportPreview: RestorePlanReportPreview;
   items: RestorePlanItem[];
 }

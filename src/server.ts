@@ -11,7 +11,7 @@ import {
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
 import { createRestorePlan } from "./restore.js";
 import { diagnoseVisibility } from "./visibility.js";
-import type { ScanResult, SearchIndexMeta, ThreadQuery } from "./types.js";
+import type { RestoreProcessCheckMode, ScanResult, SearchIndexMeta, ThreadQuery } from "./types.js";
 
 const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
 
@@ -72,9 +72,13 @@ export function createRequestHandler(options: {
           return sendJson(response, { error: "Method not allowed" }, 405);
         }
         const body = await readJsonBody(request);
-        const selectedThreadIds = selectedThreadIdsFromBody(body);
+        const planOptions = restorePlanOptionsFromBody(body);
+        const selectedThreadIds = planOptions.selectedThreadIds;
         if (selectedThreadIds.length === 0) {
           return sendJson(response, { error: "selectedThreadIds must contain at least one thread id." }, 400);
+        }
+        if (planOptions.processCheckMode === "invalid") {
+          return sendJson(response, { error: "processCheck must be warn, strict, or skip." }, 400);
         }
         return sendJson(
           response,
@@ -82,6 +86,7 @@ export function createRequestHandler(options: {
             codexHome,
             indexPath,
             selectedThreadIds,
+            processCheckMode: planOptions.processCheckMode,
           }),
         );
       }
@@ -199,15 +204,34 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-function selectedThreadIdsFromBody(body: unknown): string[] {
+function restorePlanOptionsFromBody(body: unknown): {
+  selectedThreadIds: string[];
+  processCheckMode: RestoreProcessCheckMode | "invalid";
+} {
   if (typeof body !== "object" || body === null || !("selectedThreadIds" in body)) {
-    return [];
+    return { selectedThreadIds: [], processCheckMode: "warn" };
   }
-  const value = (body as { selectedThreadIds?: unknown }).selectedThreadIds;
-  if (!Array.isArray(value)) {
-    return [];
+  const typed = body as {
+    selectedThreadIds?: unknown;
+    processCheck?: unknown;
+    processCheckMode?: unknown;
+    skipProcessCheck?: unknown;
+  };
+  const value = typed.selectedThreadIds;
+  const selectedThreadIds = Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  if (typed.skipProcessCheck === true) {
+    return { selectedThreadIds, processCheckMode: "skip" };
   }
-  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  const processCheck = typed.processCheckMode ?? typed.processCheck;
+  if (processCheck === undefined || processCheck === null) {
+    return { selectedThreadIds, processCheckMode: "warn" };
+  }
+  if (processCheck === "warn" || processCheck === "strict" || processCheck === "skip") {
+    return { selectedThreadIds, processCheckMode: processCheck };
+  }
+  return { selectedThreadIds, processCheckMode: "invalid" };
 }
 
 function contentType(filePath: string): string {

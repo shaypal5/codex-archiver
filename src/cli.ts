@@ -10,7 +10,7 @@ import { createRestorePlan } from "./restore.js";
 import { scanCodexStorage } from "./scanner.js";
 import { serve } from "./server.js";
 import { diagnoseVisibility } from "./visibility.js";
-import type { RestoreStatus } from "./types.js";
+import type { RestoreProcessCheckMode, RestoreStatus } from "./types.js";
 
 interface ParsedArgs {
   command: string;
@@ -127,6 +127,7 @@ async function main(): Promise<void> {
             codexHome,
             indexPath,
             selectedThreadIds,
+            processCheckMode: parseProcessCheckMode(args),
           }),
           null,
           2,
@@ -230,7 +231,7 @@ Usage:
   codex-archiver index search [--title text] [--content text] [--cwd path] [--status active] [--limit 100] [--offset 0]
   codex-archiver index clear [--index-path ~/.cache/codex-archiver/index.sqlite]
   codex-archiver diagnose visibility [--timeout-ms 2500] [--no-codex-resume] [--app-server-url http://127.0.0.1:PORT]
-  codex-archiver restore plan THREAD_ID... [--ids id-a,id-b] [--codex-home ~/.codex] [--index-path ~/.cache/codex-archiver/index.sqlite] [--json]
+  codex-archiver restore plan THREAD_ID... [--ids id-a,id-b] [--codex-home ~/.codex] [--index-path ~/.cache/codex-archiver/index.sqlite] [--process-check warn|strict|skip] [--skip-process-check] [--json]
 
 Commands:
   serve   Start the local read-only browser.
@@ -241,6 +242,20 @@ Commands:
   restore
           Create explicit dry-run restore plans. Planning is read-only and never mutates ~/.codex.
 `);
+}
+
+function parseProcessCheckMode(args: ParsedArgs): RestoreProcessCheckMode {
+  if (booleanFlag(args, "skip-process-check")) {
+    return "skip";
+  }
+  const value = stringFlag(args, "process-check");
+  if (value === null) {
+    return "warn";
+  }
+  if (value === "warn" || value === "strict" || value === "skip") {
+    return value;
+  }
+  throw new UsageError(`Invalid process-check mode: ${value}`);
 }
 
 main().catch((error) => {
