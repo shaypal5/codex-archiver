@@ -6,6 +6,7 @@ import {
   ensureSearchIndex,
   readSearchIndexMeta,
   rebuildSearchIndex,
+  searchCachedThreads,
   searchThreads,
 } from "./indexer.js";
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
@@ -176,7 +177,6 @@ export function createRequestHandler(options: {
       }
 
       if (url.pathname === "/api/threads") {
-        await ensureIndex();
         const status = parseStatusParam(url.searchParams.get("status"));
         if (status === "invalid") {
           return sendJson(response, { error: "Invalid status filter" }, 400);
@@ -189,7 +189,10 @@ export function createRequestHandler(options: {
           limit: parseIntegerParam(url.searchParams.get("limit")),
           offset: parseIntegerParam(url.searchParams.get("offset")),
         };
-        const result = await searchThreads({ codexHome, indexPath }, query);
+        const useCache = url.searchParams.get("cache") === "1";
+        const result = useCache
+          ? await searchCachedThreads({ codexHome, indexPath }, query)
+          : await searchThreads({ codexHome, indexPath }, query);
         return sendJson(response, {
           stats: result.stats,
           threads: result.threads,

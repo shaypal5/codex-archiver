@@ -63,6 +63,8 @@ Searches are paginated. The default limit is `100`, the maximum limit is `500`, 
 
 ## Freshness
 
-The index stores a source fingerprint derived from `state_5.sqlite`, `sessions/**/*.jsonl`, and `archived_sessions/**/*.jsonl` path/size/mtime metadata. `serve` and `index search` rebuild automatically when the source fingerprint changes or when the cache was built for a different Codex home.
+The index stores a source fingerprint derived from `state_5.sqlite`, `sessions/**/*.jsonl`, and `archived_sessions/**/*.jsonl` path/size/mtime metadata. `index search` and explicit diagnostics rebuild automatically when the source fingerprint changes or when the cache was built for a different Codex home.
+
+The browser uses stale-while-revalidate startup behavior: the thread table reads the existing index immediately when one is present, while diagnostics refresh freshness in the background. This keeps the first screen useful even when a full fingerprint check or visibility probe is slow.
 
 The current `active` status means a thread has an unarchived SQLite row and an existing rollout file. It does not yet prove that Codex Desktop currently shows that thread in the sidebar.

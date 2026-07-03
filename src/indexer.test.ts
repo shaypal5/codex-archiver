@@ -8,6 +8,7 @@ import {
   clearSearchIndex,
   readSearchIndexMeta,
   rebuildSearchIndex,
+  searchCachedThreads,
   searchThreads,
 } from "./indexer.js";
 
@@ -162,6 +163,9 @@ test("persistent index supports title, content, project, and status searches", a
   );
 
   await writeFile(activePath, "\n", { flag: "a" });
+  const cached = await searchCachedThreads({ codexHome, indexPath }, { title: "budget" });
+  assert.equal(cached.scannedAt, meta.rebuiltAt);
+
   const rebuilt = await searchThreads({ codexHome, indexPath }, { title: "budget" });
   assert.notEqual(rebuilt.scannedAt, meta.rebuiltAt);
 

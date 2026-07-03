@@ -59,13 +59,18 @@ elements.nextPage.addEventListener("click", async () => {
   await loadThreads();
 });
 
-await loadDiagnostics();
-await loadVisibility();
 await loadThreads();
+void loadDiagnostics();
 
 async function loadDiagnostics() {
-  scan = await fetchJson("/api/diagnostics");
-  renderSummary(scan);
+  elements.scanMeta.textContent = "Checking cached index freshness...";
+  try {
+    scan = await fetchJson("/api/diagnostics");
+    renderSummary(scan);
+  } catch (error) {
+    elements.scanMeta.textContent = "Index diagnostics failed.";
+    renderDiagnosticsError(error);
+  }
 }
 
 async function rebuild() {
@@ -85,6 +90,7 @@ async function rebuild() {
 }
 
 async function loadThreads() {
+  elements.resultCount.textContent = "Loading threads...";
   const params = new URLSearchParams();
   setParam(params, "title", elements.title.value);
   setParam(params, "content", elements.content.value);
@@ -92,10 +98,17 @@ async function loadThreads() {
   setParam(params, "status", elements.status.value);
   params.set("limit", String(limit));
   params.set("offset", String(offset));
-  const data = await fetchJson(`/api/threads?${params.toString()}`);
-  renderThreads(data.threads);
-  renderPagination(data);
-  renderSelectionState();
+  params.set("cache", "1");
+  try {
+    const data = await fetchJson(`/api/threads?${params.toString()}`);
+    renderSummary(data);
+    renderThreads(data.threads);
+    renderPagination(data);
+    renderSelectionState();
+  } catch (error) {
+    elements.resultCount.textContent = "Thread loading failed.";
+    renderThreadError(error);
+  }
 }
 
 async function loadVisibility() {
@@ -125,6 +138,26 @@ function renderSummary(data) {
       return item;
     }),
   );
+}
+
+function renderDiagnosticsError(error) {
+  elements.diagnostics.replaceChildren(errorDiagnostic(error));
+}
+
+function renderThreadError(error) {
+  const row = document.createElement("tr");
+  const cell = document.createElement("td");
+  cell.colSpan = 6;
+  cell.textContent = error instanceof Error ? error.message : String(error);
+  row.append(cell);
+  elements.threads.replaceChildren(row);
+}
+
+function errorDiagnostic(error) {
+  const item = document.createElement("div");
+  item.className = "diagnostic error";
+  item.textContent = error instanceof Error ? error.message : String(error);
+  return item;
 }
 
 function renderVisibility(data) {
