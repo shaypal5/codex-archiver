@@ -161,6 +161,27 @@ export async function searchThreads(
   const codexHome = path.resolve(expandHome(options.codexHome ?? defaultCodexHome()));
   const indexPath = path.resolve(expandHome(options.indexPath ?? defaultIndexPath()));
   await ensureSearchIndex({ codexHome, indexPath });
+  return searchExistingIndex({ codexHome, indexPath }, query);
+}
+
+export async function searchCachedThreads(
+  options: RebuildOptions,
+  query: ThreadQuery,
+): Promise<ScanResult> {
+  const codexHome = path.resolve(expandHome(options.codexHome ?? defaultCodexHome()));
+  const indexPath = path.resolve(expandHome(options.indexPath ?? defaultIndexPath()));
+  const meta = await readSearchIndexMeta({ codexHome, indexPath });
+  if (meta.rebuiltAt === null) {
+    return searchThreads({ codexHome, indexPath }, query);
+  }
+  return searchExistingIndex({ codexHome, indexPath }, query);
+}
+
+async function searchExistingIndex(
+  options: Required<RebuildOptions>,
+  query: ThreadQuery,
+): Promise<ScanResult> {
+  const { codexHome, indexPath } = options;
   const meta = await readSearchIndexMeta({ codexHome, indexPath });
   const normalized = normalizeQuery(query);
   const threads = await queryJson<ThreadRow>(indexPath, buildSearchSql(normalized));

@@ -24,6 +24,8 @@ http://127.0.0.1:8976
 
 The first screen shows summary badges for total threads, total projects, and active indexed threads, followed by separate filters for thread names, content previews, project paths, and restoration status.
 
+On startup, the browser renders thread results from the existing local index first, then refreshes index freshness and diagnostics in the background. Visibility diagnostics are intentionally user-triggered because they may call slow or unavailable Codex surfaces.
+
 The web UI also includes a visibility diagnostics panel. It compares the local scanned/indexed thread universe with best-effort Codex visibility surfaces when they are available, without mutating `~/.codex`.
 
 The browser also lets you select specific threads and generate a dry-run restore plan. The plan previews classifications, preflight checks, blockers, warnings, backup manifest entries, restore report fields, confirmation token, and mutation targets. Apply is intentionally CLI/API-gated for now.
