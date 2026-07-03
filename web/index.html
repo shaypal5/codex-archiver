@@ -94,12 +94,31 @@
 
       <section class="table-wrap">
         <table>
+          <colgroup>
+            <col class="select-col" />
+            <col class="thread-col" />
+            <col class="status-col" />
+            <col class="project-col" />
+            <col class="updated-col" />
+            <col class="messages-col" />
+          </colgroup>
           <thead>
             <tr>
               <th>Select</th>
               <th>Thread</th>
               <th>Status</th>
-              <th>Project</th>
+              <th class="project-heading">
+                <span>Project</span>
+                <span
+                  id="project-column-resizer"
+                  class="column-resizer"
+                  role="separator"
+                  aria-label="Resize project path column"
+                  aria-orientation="vertical"
+                  tabindex="0"
+                  title="Drag to resize project path column"
+                ></span>
+              </th>
               <th>Updated</th>
               <th>Messages</th>
             </tr>
