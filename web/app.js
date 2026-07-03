@@ -16,6 +16,7 @@ const elements = {
   restorePlanOutput: document.querySelector("#restore-plan-output"),
   prevPage: document.querySelector("#prev-page"),
   nextPage: document.querySelector("#next-page"),
+  projectColumnResizer: document.querySelector("#project-column-resizer"),
   refresh: document.querySelector("#refresh"),
   title: document.querySelector("#title-filter"),
   content: document.querySelector("#content-filter"),
@@ -28,6 +29,12 @@ let filterTimer = null;
 let offset = 0;
 const selectedThreadIds = new Set();
 const limit = 100;
+const projectColumnStorageKey = "codex-archiver.project-column-width";
+const defaultProjectColumnWidth = 560;
+const minProjectColumnWidth = 320;
+const maxProjectColumnWidth = 1100;
+
+initializeProjectColumnWidth();
 
 elements.refresh.addEventListener("click", async () => {
   await rebuild();
@@ -39,6 +46,29 @@ elements.visibilityRefresh.addEventListener("click", async () => {
 
 elements.restorePlan.addEventListener("click", async () => {
   await loadRestorePlan();
+});
+
+elements.projectColumnResizer.addEventListener("pointerdown", (event) => {
+  startProjectColumnResize(event);
+});
+
+elements.projectColumnResizer.addEventListener("dblclick", () => {
+  setProjectColumnWidth(defaultProjectColumnWidth);
+  clearStoredProjectColumnWidth();
+});
+
+elements.projectColumnResizer.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home") {
+    return;
+  }
+  event.preventDefault();
+  if (event.key === "Home") {
+    setProjectColumnWidth(defaultProjectColumnWidth);
+    clearStoredProjectColumnWidth();
+    return;
+  }
+  const direction = event.key === "ArrowRight" ? 1 : -1;
+  setProjectColumnWidth(currentProjectColumnWidth() + direction * 24);
 });
 
 for (const input of [elements.title, elements.content, elements.cwd, elements.status]) {
@@ -61,6 +91,67 @@ elements.nextPage.addEventListener("click", async () => {
 
 await loadThreads();
 void loadDiagnostics();
+
+function initializeProjectColumnWidth() {
+  const stored = readStoredProjectColumnWidth();
+  setProjectColumnWidth(stored ?? defaultProjectColumnWidth, { persist: false });
+}
+
+function startProjectColumnResize(event) {
+  event.preventDefault();
+  elements.projectColumnResizer.setPointerCapture?.(event.pointerId);
+  const startX = event.clientX;
+  const startWidth = currentProjectColumnWidth();
+
+  function move(moveEvent) {
+    setProjectColumnWidth(startWidth + moveEvent.clientX - startX);
+  }
+
+  function stop() {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", stop);
+    window.removeEventListener("pointercancel", stop);
+  }
+
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
+}
+
+function currentProjectColumnWidth() {
+  const value = getComputedStyle(document.documentElement)
+    .getPropertyValue("--project-column-width")
+    .trim();
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : defaultProjectColumnWidth;
+}
+
+function setProjectColumnWidth(width, options = {}) {
+  const persist = options.persist ?? true;
+  const nextWidth = Math.max(
+    minProjectColumnWidth,
+    Math.min(maxProjectColumnWidth, Math.round(width)),
+  );
+  document.documentElement.style.setProperty("--project-column-width", `${nextWidth}px`);
+  elements.projectColumnResizer.setAttribute("aria-valuemin", String(minProjectColumnWidth));
+  elements.projectColumnResizer.setAttribute("aria-valuemax", String(maxProjectColumnWidth));
+  elements.projectColumnResizer.setAttribute("aria-valuenow", String(nextWidth));
+  if (persist) {
+    localStorage.setItem(projectColumnStorageKey, String(nextWidth));
+  }
+}
+
+function readStoredProjectColumnWidth() {
+  const stored = Number.parseInt(localStorage.getItem(projectColumnStorageKey) ?? "", 10);
+  if (!Number.isFinite(stored)) {
+    return null;
+  }
+  return stored;
+}
+
+function clearStoredProjectColumnWidth() {
+  localStorage.removeItem(projectColumnStorageKey);
+}
 
 async function loadDiagnostics() {
   elements.scanMeta.textContent = "Checking cached index freshness...";
