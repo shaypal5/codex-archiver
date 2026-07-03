@@ -13,6 +13,14 @@ export type RestoreStatus =
   | "restorable"
   | "unknown";
 
+export type ThreadSortKey =
+  | "updated"
+  | "status"
+  | "project"
+  | "messages";
+
+export type SortDirection = "asc" | "desc";
+
 export interface ThreadRecord {
   id: string;
   title: string | null;
@@ -28,6 +36,18 @@ export interface ThreadRecord {
   transcriptText?: string;
   restoreStatus: RestoreStatus;
   sourcePaths: string[];
+}
+
+export interface ThreadMessage {
+  sequence: number;
+  timestamp: string | null;
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface ThreadDetail {
+  thread: ThreadRecord;
+  messages: ThreadMessage[];
 }
 
 export interface ScanStats {
@@ -60,6 +80,8 @@ export interface ThreadQuery {
   content?: string;
   cwd?: string;
   status?: RestoreStatus | "all";
+  sort?: ThreadSortKey;
+  direction?: SortDirection;
   limit?: number;
   offset?: number;
 }

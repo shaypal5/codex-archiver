@@ -124,7 +124,7 @@ test("diagnose visibility CLI returns JSON diagnostics", async (t) => {
   assert.equal(parsed.probes?.length, 4);
 });
 
-test("visibility API route returns diagnostics", async (t) => {
+test("visibility and thread API routes return diagnostics, sorted lists, and details", async (t) => {
   if (!hasSqliteCli()) {
     t.skip("sqlite3 CLI is required for visibility API tests");
     return;
@@ -155,6 +155,46 @@ test("visibility API route returns diagnostics", async (t) => {
   };
   assert.equal(body.summary?.totalThreads, 3);
   assert.deepEqual(body.threads, []);
+
+  const sorted = await fetch(
+    `http://127.0.0.1:${address.port}/api/threads?sort=project&direction=desc&limit=2`,
+  );
+  assert.equal(sorted.status, 200);
+  const sortedBody = (await sorted.json()) as {
+    threads?: Array<{ id?: string }>;
+  };
+  assert.deepEqual(
+    sortedBody.threads?.map((thread) => thread.id),
+    ["missing-thread", "archived-thread"],
+  );
+
+  const detail = await fetch(`http://127.0.0.1:${address.port}/api/thread?id=active-thread`);
+  assert.equal(detail.status, 200);
+  const detailBody = (await detail.json()) as {
+    thread?: { id?: string };
+    messages?: Array<{ role?: string; text?: string }>;
+  };
+  assert.equal(detailBody.thread?.id, "active-thread");
+  assert.deepEqual(detailBody.messages, [
+    {
+      sequence: 2,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      role: "user",
+      text: "open active thread",
+    },
+    {
+      sequence: 3,
+      timestamp: "2026-07-01T10:00:02.000Z",
+      role: "assistant",
+      text: "active reply",
+    },
+  ]);
+
+  const missingDetail = await fetch(`http://127.0.0.1:${address.port}/api/thread?id=unknown`);
+  assert.equal(missingDetail.status, 404);
+
+  const invalidSort = await fetch(`http://127.0.0.1:${address.port}/api/threads?sort=title`);
+  assert.equal(invalidSort.status, 400);
 
   const rejected = await fetch(
     `http://127.0.0.1:${address.port}/api/visibility?appServerUrl=http://example.com`,
@@ -337,6 +377,24 @@ async function createFixture(t: TestContext): Promise<{ codexHome: string; index
       timestamp: "2026-07-01T10:00:00.000Z",
       type: "session_meta",
       payload: { id: "active-thread", cwd: "/tmp/project-a" },
+    },
+    {
+      timestamp: "2026-07-01T10:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "open active thread" }],
+      },
+    },
+    {
+      timestamp: "2026-07-01T10:00:02.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "active reply" }],
+      },
     },
   ]);
   await writeJsonl(archivedPath, [

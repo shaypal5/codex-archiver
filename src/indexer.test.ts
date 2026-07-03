@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   clearSearchIndex,
+  readThreadDetail,
   readSearchIndexMeta,
   rebuildSearchIndex,
   searchCachedThreads,
@@ -60,6 +61,15 @@ test("persistent index supports title, content, project, and status searches", a
         type: "message",
         role: "user",
         content: [{ type: "input_text", text: "restore pineapple archive thread" }],
+      },
+    },
+    {
+      timestamp: "2026-07-01T10:00:03.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "pineapple response" }],
       },
     },
   ]);
@@ -156,6 +166,45 @@ test("persistent index supports title, content, project, and status searches", a
   assert.equal(paged.limit, 1);
   assert.equal(paged.offset, 1);
   assert.equal(paged.threads.length, 1);
+
+  const projectDesc = await searchThreads(
+    { codexHome, indexPath },
+    { sort: "project", direction: "desc" },
+  );
+  assert.deepEqual(
+    projectDesc.threads.map((thread) => thread.id),
+    ["archived-thread", "active-thread"],
+  );
+
+  const statusDesc = await searchThreads(
+    { codexHome, indexPath },
+    { sort: "status", direction: "desc" },
+  );
+  assert.deepEqual(
+    statusDesc.threads.map((thread) => thread.id),
+    ["archived-thread", "active-thread"],
+  );
+
+  const messagesDesc = await searchThreads(
+    { codexHome, indexPath },
+    { sort: "messages", direction: "desc" },
+  );
+  assert.deepEqual(
+    messagesDesc.threads.map((thread) => thread.id),
+    ["active-thread", "archived-thread"],
+  );
+
+  const detail = await readThreadDetail({ codexHome, indexPath }, "active-thread");
+  assert(detail);
+  assert.equal(detail.thread.id, "active-thread");
+  assert.deepEqual(
+    detail.messages.map((message) => [message.role, message.text]),
+    [
+      ["user", "restore pineapple archive thread"],
+      ["assistant", "pineapple response"],
+    ],
+  );
+  assert.equal(await readThreadDetail({ codexHome, indexPath }, "does-not-exist"), null);
 
   await assert.rejects(
     searchThreads({ codexHome, indexPath }, { status: "archive" as never }),

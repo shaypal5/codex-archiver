@@ -26,6 +26,8 @@ The first screen shows summary badges for total threads, total projects, and loc
 
 `Local active` means the thread has unarchived local Codex state plus an active rollout file. It does not prove that Codex Desktop currently shows the thread in the sidebar; use visibility diagnostics for that narrower app-level check.
 
+The thread table can be sorted by local status, project path, update time, or message count. Clicking a table row opens a floating transcript viewer that reads the underlying rollout JSONL and shows user/assistant messages in chronological order from the top.
+
 On startup, the browser renders thread results from the existing local index first, then refreshes index freshness and diagnostics in the background. Visibility diagnostics are intentionally user-triggered because they may call slow or unavailable Codex surfaces.
 
 The web UI also includes a visibility diagnostics panel. It compares the local scanned/indexed thread universe with best-effort Codex visibility surfaces when they are available, without mutating `~/.codex`.

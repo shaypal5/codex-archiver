@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ensureSearchIndex,
+  readThreadDetail,
   readSearchIndexMeta,
   rebuildSearchIndex,
   searchCachedThreads,
@@ -12,7 +13,14 @@ import {
 import { defaultCodexHome, defaultIndexPath } from "./paths.js";
 import { applyRestorePlan, createRestorePlan, undoRestoreApply, type CodexProcessDetector } from "./restore.js";
 import { diagnoseVisibility } from "./visibility.js";
-import type { RestoreProcessCheckMode, ScanResult, SearchIndexMeta, ThreadQuery } from "./types.js";
+import type {
+  RestoreProcessCheckMode,
+  ScanResult,
+  SearchIndexMeta,
+  SortDirection,
+  ThreadQuery,
+  ThreadSortKey,
+} from "./types.js";
 
 const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
 
@@ -176,16 +184,38 @@ export function createRequestHandler(options: {
         return sendJson(response, metaToResponse(await rebuildIndex()));
       }
 
+      if (url.pathname === "/api/thread") {
+        const threadId = url.searchParams.get("id")?.trim();
+        if (!threadId) {
+          return sendJson(response, { error: "id is required." }, 400);
+        }
+        const detail = await readThreadDetail({ codexHome, indexPath }, threadId);
+        if (!detail) {
+          return sendJson(response, { error: "Thread not found." }, 404);
+        }
+        return sendJson(response, detail);
+      }
+
       if (url.pathname === "/api/threads") {
         const status = parseStatusParam(url.searchParams.get("status"));
         if (status === "invalid") {
           return sendJson(response, { error: "Invalid status filter" }, 400);
+        }
+        const sort = parseSortParam(url.searchParams.get("sort"));
+        if (sort === "invalid") {
+          return sendJson(response, { error: "Invalid sort key" }, 400);
+        }
+        const direction = parseDirectionParam(url.searchParams.get("direction"));
+        if (direction === "invalid") {
+          return sendJson(response, { error: "Invalid sort direction" }, 400);
         }
         const query: ThreadQuery = {
           title: url.searchParams.get("title") ?? undefined,
           content: url.searchParams.get("content") ?? undefined,
           cwd: url.searchParams.get("cwd") ?? undefined,
           status,
+          sort,
+          direction,
           limit: parseIntegerParam(url.searchParams.get("limit")),
           offset: parseIntegerParam(url.searchParams.get("offset")),
         };
@@ -450,6 +480,26 @@ function parseStatusParam(value: string | null): ThreadQuery["status"] | "invali
     value === "restorable" ||
     value === "unknown"
   ) {
+    return value;
+  }
+  return "invalid";
+}
+
+function parseSortParam(value: string | null): ThreadSortKey | undefined | "invalid" {
+  if (value === null || value === "") {
+    return undefined;
+  }
+  if (value === "updated" || value === "status" || value === "project" || value === "messages") {
+    return value;
+  }
+  return "invalid";
+}
+
+function parseDirectionParam(value: string | null): SortDirection | undefined | "invalid" {
+  if (value === null || value === "") {
+    return undefined;
+  }
+  if (value === "asc" || value === "desc") {
     return value;
   }
   return "invalid";

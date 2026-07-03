@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Codex Archiver</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -107,9 +108,11 @@
             <tr>
               <th>Select</th>
               <th>Thread</th>
-              <th>Status</th>
+              <th>
+                <button class="sort-button" type="button" data-sort-key="status">Status</button>
+              </th>
               <th class="project-heading">
-                <span>Project</span>
+                <button class="sort-button" type="button" data-sort-key="project">Project</button>
                 <span
                   id="project-column-resizer"
                   class="column-resizer"
@@ -120,14 +123,30 @@
                   title="Drag to resize project path column"
                 ></span>
               </th>
-              <th>Updated</th>
-              <th>Messages</th>
+              <th>
+                <button class="sort-button" type="button" data-sort-key="updated">Updated</button>
+              </th>
+              <th>
+                <button class="sort-button" type="button" data-sort-key="messages">Messages</button>
+              </th>
             </tr>
           </thead>
           <tbody id="threads"></tbody>
         </table>
       </section>
     </main>
+    <dialog id="thread-dialog" class="thread-dialog" aria-labelledby="thread-dialog-title">
+      <article class="thread-dialog-panel">
+        <header class="thread-dialog-header">
+          <div>
+            <h2 id="thread-dialog-title">Thread</h2>
+            <p id="thread-dialog-meta"></p>
+          </div>
+          <button id="thread-dialog-close" class="icon-button" type="button" aria-label="Close thread viewer">Close</button>
+        </header>
+        <div id="thread-dialog-messages" class="thread-dialog-messages"></div>
+      </article>
+    </dialog>
     <script src="/app.js" type="module"></script>
   </body>
 </html>
