@@ -288,7 +288,7 @@ function renderVisibility(data) {
     visibilityMetric("Session index", nullableNumber(data.summary.sessionIndexPresent)),
     visibilityMetric("Search index", data.summary.indexedPresent),
     visibilityMetric("codex resume", nullableNumber(data.summary.codexResumeVisible)),
-    visibilityMetric("App server", nullableNumber(data.summary.appServerVisible)),
+    visibilityMetric("Desktop app-server", nullableNumber(data.summary.appServerVisible)),
   );
   elements.visibilityProbes.replaceChildren(
     ...data.probes.map((probe) => {
@@ -553,8 +553,36 @@ function threadCell(thread) {
 function statusBadge(status) {
   const badge = document.createElement("span");
   badge.className = `status ${status}`;
-  badge.textContent = status;
+  badge.textContent = statusLabel(status);
+  badge.title = statusHelp(status);
   return badge;
+}
+
+function statusLabel(status) {
+  return (
+    {
+      active: "Local active",
+      archived: "Archived",
+      hidden: "Hidden",
+      orphaned: "Orphaned",
+      restorable: "Restorable",
+      unknown: "Unknown",
+    }[status] ?? status
+  );
+}
+
+function statusHelp(status) {
+  return (
+    {
+      active:
+        "Unarchived local Codex state with an active rollout file. This does not prove Codex Desktop shows it in the sidebar.",
+      archived: "Archived local Codex state with archived rollout evidence.",
+      hidden: "Active-session rollout evidence that is not fully represented in SQLite.",
+      orphaned: "SQLite row whose rollout file is missing.",
+      restorable: "Archived JSONL evidence without a matching SQLite row.",
+      unknown: "The scanner could not classify this thread state.",
+    }[status] ?? "Local restore status."
+  );
 }
 
 function pathText(value) {
