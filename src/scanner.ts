@@ -11,6 +11,7 @@ import type {
   ScanResult,
   ScanStats,
   StorageKind,
+  ThreadMessage,
   ThreadQuery,
   ThreadRecord,
 } from "./types.js";
@@ -129,6 +130,36 @@ export function filterThreads(threads: ThreadRecord[], query: ThreadQuery): Thre
     }
     return true;
   });
+}
+
+export async function readThreadMessagesFromJsonl(file: string): Promise<ThreadMessage[]> {
+  const messages: ThreadMessage[] = [];
+  let sequence = 0;
+  const rl = createInterface({
+    input: createReadStream(file, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+
+  for await (const line of rl) {
+    sequence += 1;
+    if (!line.trim()) {
+      continue;
+    }
+
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const message = extractTranscriptMessage(value, sequence);
+    if (message !== null) {
+      messages.push(message);
+    }
+  }
+
+  return messages;
 }
 
 async function readSqliteThreads(
@@ -265,15 +296,15 @@ async function readJsonlThread(
         updatedAt = updatedAt === null ? timestamp : Math.max(updatedAt, timestamp);
       }
 
-      const messageText = extractTranscriptMessage(value);
-      if (messageText !== null) {
+      const message = extractTranscriptMessage(value, lineCount);
+      if (message !== null) {
         messageCount += 1;
-        if (options.includeTranscriptText && messageText) {
-          transcriptParts.push(messageText);
+        if (options.includeTranscriptText && message.text) {
+          transcriptParts.push(message.text);
         }
-        if (previewLength < 4000 && messageText) {
-          textParts.push(messageText);
-          previewLength += messageText.length + 1;
+        if (previewLength < 4000 && message.text) {
+          textParts.push(message.text);
+          previewLength += message.text.length + 1;
         }
       }
     }
@@ -545,7 +576,7 @@ function cleanString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function extractTranscriptMessage(value: unknown): string | null {
+function extractTranscriptMessage(value: unknown, sequence: number): ThreadMessage | null {
   if (!isRecord(value) || value.type !== "response_item" || !isRecord(value.payload)) {
     return null;
   }
@@ -558,7 +589,12 @@ function extractTranscriptMessage(value: unknown): string | null {
     return null;
   }
   if (!Array.isArray(payload.content)) {
-    return "";
+    return {
+      sequence,
+      timestamp: firstStringAt(value, [["timestamp"], ["payload", "timestamp"]]),
+      role: payload.role,
+      text: "",
+    };
   }
 
   const text = payload.content
@@ -579,7 +615,12 @@ function extractTranscriptMessage(value: unknown): string | null {
     return null;
   }
 
-  return normalized;
+  return {
+    sequence,
+    timestamp: firstStringAt(value, [["timestamp"], ["payload", "timestamp"]]),
+    role: payload.role,
+    text: normalized,
+  };
 }
 
 function isSyntheticUserContext(text: string): boolean {

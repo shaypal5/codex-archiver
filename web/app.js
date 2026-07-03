@@ -17,6 +17,12 @@ const elements = {
   prevPage: document.querySelector("#prev-page"),
   nextPage: document.querySelector("#next-page"),
   projectColumnResizer: document.querySelector("#project-column-resizer"),
+  sortButtons: Array.from(document.querySelectorAll("[data-sort-key]")),
+  threadDialog: document.querySelector("#thread-dialog"),
+  threadDialogTitle: document.querySelector("#thread-dialog-title"),
+  threadDialogMeta: document.querySelector("#thread-dialog-meta"),
+  threadDialogMessages: document.querySelector("#thread-dialog-messages"),
+  threadDialogClose: document.querySelector("#thread-dialog-close"),
   refresh: document.querySelector("#refresh"),
   title: document.querySelector("#title-filter"),
   content: document.querySelector("#content-filter"),
@@ -27,6 +33,8 @@ const elements = {
 let scan = null;
 let filterTimer = null;
 let offset = 0;
+let sortKey = "updated";
+let sortDirection = "desc";
 const selectedThreadIds = new Set();
 const limit = 100;
 const projectColumnStorageKey = "codex-archiver.project-column-width";
@@ -47,6 +55,34 @@ elements.visibilityRefresh.addEventListener("click", async () => {
 elements.restorePlan.addEventListener("click", async () => {
   await loadRestorePlan();
 });
+
+elements.threadDialogClose.addEventListener("click", () => {
+  closeThreadDialog();
+});
+
+elements.threadDialog.addEventListener("click", (event) => {
+  if (event.target === elements.threadDialog) {
+    closeThreadDialog();
+  }
+});
+
+for (const button of elements.sortButtons) {
+  button.addEventListener("click", async () => {
+    const nextKey = button.dataset.sortKey;
+    if (!nextKey) {
+      return;
+    }
+    if (sortKey === nextKey) {
+      sortDirection = sortDirection === "asc" ? "desc" : "asc";
+    } else {
+      sortKey = nextKey;
+      sortDirection = nextKey === "updated" || nextKey === "messages" ? "desc" : "asc";
+    }
+    offset = 0;
+    renderSortState();
+    await loadThreads();
+  });
+}
 
 elements.projectColumnResizer.addEventListener("pointerdown", (event) => {
   startProjectColumnResize(event);
@@ -91,6 +127,7 @@ elements.nextPage.addEventListener("click", async () => {
 
 await loadThreads();
 void loadDiagnostics();
+renderSortState();
 
 function initializeProjectColumnWidth() {
   const stored = readStoredProjectColumnWidth();
@@ -188,6 +225,8 @@ async function loadThreads() {
   setParam(params, "content", elements.content.value);
   setParam(params, "cwd", elements.cwd.value);
   setParam(params, "status", elements.status.value);
+  params.set("sort", sortKey);
+  params.set("direction", sortDirection);
   params.set("limit", String(limit));
   params.set("offset", String(offset));
   params.set("cache", "1");
@@ -344,6 +383,25 @@ function renderThreads(threads) {
   elements.threads.replaceChildren(
     ...threads.map((thread) => {
       const row = document.createElement("tr");
+      row.className = "thread-row";
+      row.tabIndex = 0;
+      row.setAttribute("aria-label", `Open ${thread.title || thread.id}`);
+      row.addEventListener("click", (event) => {
+        if (event.target instanceof Element && event.target.closest("input, button")) {
+          return;
+        }
+        void openThread(thread.id);
+      });
+      row.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") {
+          return;
+        }
+        if (event.target instanceof Element && event.target.closest("input, button")) {
+          return;
+        }
+        event.preventDefault();
+        void openThread(thread.id);
+      });
       row.append(
         cell(selectionCheckbox(thread)),
         cell(threadCell(thread)),
@@ -521,6 +579,9 @@ function selectionCheckbox(thread) {
   checkbox.type = "checkbox";
   checkbox.checked = selectedThreadIds.has(thread.id);
   checkbox.setAttribute("aria-label", `Select ${thread.title || thread.id}`);
+  checkbox.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
   checkbox.addEventListener("change", () => {
     if (checkbox.checked) {
       selectedThreadIds.add(thread.id);
@@ -540,6 +601,7 @@ function renderSelectionState() {
 
 function threadCell(thread) {
   const wrapper = document.createElement("div");
+  wrapper.className = "thread-cell";
   const title = document.createElement("div");
   title.className = "thread-title";
   title.textContent = thread.title || thread.id;
@@ -548,6 +610,88 @@ function threadCell(thread) {
   preview.textContent = thread.contentPreview || thread.rolloutPath || "No preview available.";
   wrapper.append(title, preview);
   return wrapper;
+}
+
+async function openThread(threadId) {
+  elements.threadDialogTitle.textContent = "Loading thread...";
+  elements.threadDialogMeta.textContent = "";
+  elements.threadDialogMessages.replaceChildren(restoreNote("Loading messages..."));
+  showThreadDialog();
+  try {
+    const detail = await fetchJson(`/api/thread?id=${encodeURIComponent(threadId)}`);
+    renderThreadDialog(detail);
+  } catch (error) {
+    elements.threadDialogTitle.textContent = "Thread loading failed";
+    elements.threadDialogMeta.textContent = error instanceof Error ? error.message : String(error);
+    elements.threadDialogMessages.replaceChildren();
+  }
+}
+
+function renderThreadDialog(detail) {
+  const thread = detail.thread;
+  elements.threadDialogTitle.textContent = thread.title || thread.id;
+  elements.threadDialogMeta.textContent = [
+    statusLabel(thread.restoreStatus),
+    thread.cwd || "No project path",
+    `${number(thread.messageCount)} message(s)`,
+    formatDate(thread.updatedAt),
+  ].join(" · ");
+
+  const messages = Array.isArray(detail.messages) ? detail.messages : [];
+  if (messages.length === 0) {
+    elements.threadDialogMessages.replaceChildren(
+      restoreNote("No user or assistant messages were found in readable rollout files."),
+    );
+  } else {
+    elements.threadDialogMessages.replaceChildren(...messages.map(threadMessage));
+  }
+  elements.threadDialogMessages.scrollTop = 0;
+}
+
+function threadMessage(message) {
+  const item = document.createElement("article");
+  item.className = `thread-message ${message.role}`;
+  const header = document.createElement("div");
+  header.className = "thread-message-header";
+  const role = document.createElement("strong");
+  role.textContent = message.role === "assistant" ? "Assistant" : "User";
+  const timestamp = document.createElement("span");
+  timestamp.textContent = formatTimestamp(message.timestamp);
+  header.append(role, timestamp);
+  const text = document.createElement("p");
+  text.textContent = message.text || "(empty message)";
+  item.append(header, text);
+  return item;
+}
+
+function showThreadDialog() {
+  if (typeof elements.threadDialog.showModal === "function" && !elements.threadDialog.open) {
+    elements.threadDialog.showModal();
+  } else {
+    elements.threadDialog.setAttribute("open", "");
+  }
+  requestAnimationFrame(() => {
+    elements.threadDialogMessages.scrollTop = 0;
+  });
+}
+
+function closeThreadDialog() {
+  if (typeof elements.threadDialog.close === "function") {
+    elements.threadDialog.close();
+  } else {
+    elements.threadDialog.removeAttribute("open");
+  }
+}
+
+function renderSortState() {
+  for (const button of elements.sortButtons) {
+    const active = button.dataset.sortKey === sortKey;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.dataset.direction = active ? sortDirection : "";
+    const label = button.textContent?.replace(/\s+[↑↓]$/, "") ?? "";
+    button.textContent = active ? `${label} ${sortDirection === "asc" ? "↑" : "↓"}` : label;
+  }
 }
 
 function statusBadge(status) {
@@ -621,6 +765,14 @@ function formatDate(epoch) {
     return "-";
   }
   return new Date(epoch * 1000).toLocaleString();
+}
+
+function formatTimestamp(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
 }
 
 function number(value) {

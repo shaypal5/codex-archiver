@@ -2,16 +2,20 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { defaultCodexHome, defaultIndexPath, expandHome } from "./paths.js";
-import { scanCodexStorage } from "./scanner.js";
+import { readThreadMessagesFromJsonl, scanCodexStorage } from "./scanner.js";
 import { queryJson, runSqlStream, sqlLikePattern, sqlValue, type SqlWriter } from "./sqlite.js";
 import type {
   Diagnostic,
   RestoreStatus,
+  SortDirection,
   ScanResult,
   ScanStats,
   SearchIndexMeta,
+  ThreadDetail,
+  ThreadMessage,
   ThreadQuery,
   ThreadRecord,
+  ThreadSortKey,
 } from "./types.js";
 
 interface RebuildOptions {
@@ -58,6 +62,8 @@ interface NormalizedThreadQuery {
   content?: string;
   cwd?: string;
   status: RestoreStatus | null;
+  sort: ThreadSortKey;
+  direction: SortDirection;
   limit: number;
   offset: number;
 }
@@ -72,6 +78,8 @@ const VALID_STATUSES = new Set<RestoreStatus>([
 ]);
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
+const DEFAULT_SORT: ThreadSortKey = "updated";
+const DEFAULT_DIRECTION: SortDirection = "desc";
 
 export async function rebuildSearchIndex(options: RebuildOptions = {}): Promise<SearchIndexMeta> {
   const codexHome = path.resolve(expandHome(options.codexHome ?? defaultCodexHome()));
@@ -175,6 +183,25 @@ export async function searchCachedThreads(
     return searchThreads({ codexHome, indexPath }, query);
   }
   return searchExistingIndex({ codexHome, indexPath }, query);
+}
+
+export async function readThreadDetail(
+  options: RebuildOptions,
+  threadId: string,
+): Promise<ThreadDetail | null> {
+  const codexHome = path.resolve(expandHome(options.codexHome ?? defaultCodexHome()));
+  const indexPath = path.resolve(expandHome(options.indexPath ?? defaultIndexPath()));
+  await ensureSearchIndex({ codexHome, indexPath });
+  const [row] = await queryJson<ThreadRow>(
+    indexPath,
+    `${baseThreadSelect()} WHERE id = ${sqlValue(threadId)} LIMIT 1;`,
+  );
+  if (!row) {
+    return null;
+  }
+  const thread = rowToThread(row);
+  const messages = await readMessagesForThread(thread);
+  return { thread, messages };
 }
 
 async function searchExistingIndex(
@@ -284,9 +311,28 @@ function insertThreadSql(thread: ThreadRecord): string {
 
 function buildSearchSql(query: NormalizedThreadQuery): string {
   const where = buildWhere(query);
-  return `SELECT id, title, cwd, updated_at AS updatedAt, created_at AS createdAt, archived, rollout_path AS rolloutPath, storage_kind AS storageKind, exists_on_disk AS existsOnDisk, message_count AS messageCount, content_preview AS contentPreview, restore_status AS restoreStatus, source_paths_json AS sourcePathsJson FROM threads${
+  return `${baseThreadSelect()}${
     where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""
-  } ORDER BY COALESCE(updated_at, 0) DESC, id ASC LIMIT ${query.limit} OFFSET ${query.offset};`;
+  } ${buildOrderBy(query)} LIMIT ${query.limit} OFFSET ${query.offset};`;
+}
+
+function baseThreadSelect(): string {
+  return "SELECT id, title, cwd, updated_at AS updatedAt, created_at AS createdAt, archived, rollout_path AS rolloutPath, storage_kind AS storageKind, exists_on_disk AS existsOnDisk, message_count AS messageCount, content_preview AS contentPreview, restore_status AS restoreStatus, source_paths_json AS sourcePathsJson FROM threads";
+}
+
+function buildOrderBy(query: NormalizedThreadQuery): string {
+  const direction = query.direction === "asc" ? "ASC" : "DESC";
+  const reverseDirection = query.direction === "asc" ? "DESC" : "ASC";
+  if (query.sort === "status") {
+    return `ORDER BY restore_status ${direction}, COALESCE(updated_at, 0) DESC, id ASC`;
+  }
+  if (query.sort === "project") {
+    return `ORDER BY COALESCE(cwd, '') ${direction}, COALESCE(updated_at, 0) DESC, id ASC`;
+  }
+  if (query.sort === "messages") {
+    return `ORDER BY message_count ${direction}, COALESCE(updated_at, 0) DESC, id ASC`;
+  }
+  return `ORDER BY COALESCE(updated_at, 0) ${direction}, id ${reverseDirection}`;
 }
 
 async function countSearchMatches(
@@ -372,6 +418,8 @@ function normalizeQuery(query: ThreadQuery): NormalizedThreadQuery {
     content: query.content,
     cwd: query.cwd,
     status: normalizeStatus(query.status),
+    sort: normalizeSort(query.sort),
+    direction: normalizeDirection(query.direction),
     limit: normalizeLimit(query.limit),
     offset: normalizeOffset(query.offset),
   };
@@ -385,6 +433,26 @@ function normalizeStatus(status: ThreadQuery["status"]): RestoreStatus | null {
     throw new Error(`Invalid status filter: ${status}`);
   }
   return status;
+}
+
+function normalizeSort(sort: ThreadQuery["sort"]): ThreadSortKey {
+  if (sort === undefined) {
+    return DEFAULT_SORT;
+  }
+  if (sort === "updated" || sort === "status" || sort === "project" || sort === "messages") {
+    return sort;
+  }
+  throw new Error(`Invalid sort key: ${sort}`);
+}
+
+function normalizeDirection(direction: ThreadQuery["direction"]): SortDirection {
+  if (direction === undefined) {
+    return DEFAULT_DIRECTION;
+  }
+  if (direction === "asc" || direction === "desc") {
+    return direction;
+  }
+  throw new Error(`Invalid sort direction: ${direction}`);
 }
 
 function normalizeLimit(value: number | undefined): number {
@@ -408,6 +476,33 @@ function parseSourcePaths(value: string): string[] {
   } catch {
     return [];
   }
+}
+
+async function readMessagesForThread(thread: ThreadRecord): Promise<ThreadMessage[]> {
+  const messages: ThreadMessage[] = [];
+  for (const sourcePath of thread.sourcePaths) {
+    try {
+      messages.push(...(await readThreadMessagesFromJsonl(sourcePath)));
+    } catch {
+      // Missing or unreadable source files are already represented by the thread status.
+    }
+  }
+  return messages.sort((a, b) => {
+    const left = parseMessageTime(a.timestamp);
+    const right = parseMessageTime(b.timestamp);
+    if (left !== right) {
+      return left - right;
+    }
+    return a.sequence - b.sequence;
+  });
+}
+
+function parseMessageTime(value: string | null): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function emptyStats(): ScanStats {

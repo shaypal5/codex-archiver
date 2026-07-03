@@ -61,6 +61,10 @@ Transcript search is intentionally schema-aware. It indexes user and assistant m
 
 Searches are paginated. The default limit is `100`, the maximum limit is `500`, and responses include `totalMatches`, `limit`, and `offset`.
 
+The browser API supports server-side sort keys for paged tables: `updated`, `status`, `project`, and `messages`, each with `direction=asc|desc`. The default remains newest updated threads first.
+
+The browser's thread viewer uses `GET /api/thread?id=THREAD_ID` to load the indexed thread record and read chronological user/assistant messages from the thread's rollout JSONL files. Developer/system context, tool calls, and event messages stay excluded from the displayed transcript by the same parser used for content search.
+
 ## Freshness
 
 The index stores a source fingerprint derived from `state_5.sqlite`, `sessions/**/*.jsonl`, and `archived_sessions/**/*.jsonl` path/size/mtime metadata. `index search` and explicit diagnostics rebuild automatically when the source fingerprint changes or when the cache was built for a different Codex home.
