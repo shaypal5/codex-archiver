@@ -5,7 +5,7 @@ import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { applyRestorePlan, createRestorePlan, undoRestoreApply } from "./restore.js";
+import { applyRestorePlan, createRestorePlan, matchCodexProcess, undoRestoreApply } from "./restore.js";
 import { createRequestHandler } from "./server.js";
 
 test("restore planner classifies explicit selections without mutating codex home", async (t) => {
@@ -125,6 +125,26 @@ test("restore planner reports process preflight warnings and strict failures wit
   const check = strictPlan.preflight.checks.find((candidate) => candidate.id === "codex-processes-closed");
   assert.equal(check?.status, "failed");
   assert.equal(check?.blocking, true);
+});
+
+test("codex process detection ignores crashpad helpers but keeps real codex processes", () => {
+  assert.equal(
+    matchCodexProcess(
+      26798,
+      "/Applications/Co /Applications/Codex.app/Contents/Frameworks/Codex Framework.framework/Versions/149.0.7827.197/Helpers/browser_crashpad_handler --monitor-self --database=/Users/shaypalachy/Library/Application Support/Codex/Crashpad",
+    ),
+    null,
+  );
+  assert.deepEqual(matchCodexProcess(123, "/Applications/Codex.app/Contents/MacOS/Codex"), {
+    pid: 123,
+    command: "/Applications/Codex.app/Contents/MacOS/Codex",
+    matchedBy: "Codex Desktop",
+  });
+  assert.deepEqual(matchCodexProcess(124, "/Applications/Codex.app/Contents/Resources/codex app-server"), {
+    pid: 124,
+    command: "/Applications/Codex.app/Contents/Resources/codex app-server",
+    matchedBy: "Codex app-server",
+  });
 });
 
 test("restore planner flags active target conflicts for future apply candidates", async (t) => {

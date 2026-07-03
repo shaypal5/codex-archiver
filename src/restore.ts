@@ -2213,7 +2213,7 @@ function parsePosixProcessLine(line: string): CodexProcessInfo | null {
     return null;
   }
   const [, pid, commandName, args] = match;
-  return processMatch(Number(pid), `${commandName} ${args}`.trim());
+  return matchCodexProcess(Number(pid), `${commandName} ${args}`.trim());
 }
 
 function parseWindowsTaskLine(line: string): CodexProcessInfo | null {
@@ -2221,19 +2221,22 @@ function parseWindowsTaskLine(line: string): CodexProcessInfo | null {
   if (columns.length < 2) {
     return null;
   }
-  return processMatch(Number(columns[1]), columns.join(" "));
+  return matchCodexProcess(Number(columns[1]), columns.join(" "));
 }
 
-function processMatch(pid: number, command: string): CodexProcessInfo | null {
+export function matchCodexProcess(pid: number, command: string): CodexProcessInfo | null {
   const normalized = command.toLowerCase();
   const currentScript = process.argv.join(" ").toLowerCase();
   if (currentScript && normalized.includes(currentScript)) {
     return null;
   }
+  if (isIgnoredCodexHelperProcess(normalized)) {
+    return null;
+  }
 
   const patterns = [
-    { label: "Codex Desktop", pattern: /\bcodex desktop\b|\bcodex\.app\b|\/codex(?:\.app)?\/contents\//i },
     { label: "Codex app-server", pattern: /\bapp-server\b.*\bcodex\b|\bcodex\b.*\bapp-server\b/i },
+    { label: "Codex Desktop", pattern: /\bcodex desktop\b|\bcodex\.app\b|\/codex(?:\.app)?\/contents\//i },
     { label: "codex process", pattern: /(^|[\\/\s])codex(\.exe)?($|[\s-])/i },
   ];
   for (const pattern of patterns) {
@@ -2246,6 +2249,15 @@ function processMatch(pid: number, command: string): CodexProcessInfo | null {
     }
   }
   return null;
+}
+
+function isIgnoredCodexHelperProcess(normalizedCommand: string): boolean {
+  return (
+    normalizedCommand.includes("browser_crashpad_handler") ||
+    normalizedCommand.includes("crashpad_handler") ||
+    normalizedCommand.includes("crashpad-handler") ||
+    normalizedCommand.includes("--type=crashpad")
+  );
 }
 
 function csvColumns(line: string): string[] {

@@ -114,7 +114,7 @@ Preflight is non-mutating. Planning returns a full report even when checks fail.
 - `selected-ids-present`: fails when a selected id is no longer present in the current scan.
 - `rollout-sources-exist`: fails when SQLite or scan evidence references a missing rollout/session JSONL file.
 - `target-path-conflicts`: fails when a planned active/archive target path already exists outside the selected thread evidence.
-- `codex-processes-closed`: uses best-effort process detection for Codex Desktop, app-server, and codex processes. It is `warning` in default mode when matches are found, `failed` in `strict` mode, and `unknown` when skipped or unavailable.
+- `codex-processes-closed`: uses best-effort process detection for Codex Desktop, app-server, and codex processes. It ignores Electron crashpad helper processes because they can remain briefly after the app exits and do not represent an active Codex UI/server. It is `warning` in default mode when meaningful matches are found, `failed` in `strict` mode, and `unknown` when skipped or unavailable.
 
 Process detection is best-effort and cross-platform-ish: macOS/Linux use `ps`, Windows uses `tasklist`. Apply requires the user to close Codex and blocks on warnings, failures, or unknown process-check status.
 
