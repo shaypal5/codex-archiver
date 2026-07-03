@@ -102,6 +102,12 @@ label {
   gap: 6px;
 }
 
+.field-help {
+  color: #686b63;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
 input,
 select {
   background: white;
@@ -547,7 +553,6 @@ td {
   font-size: 12px;
   font-weight: 700;
   padding: 4px 8px;
-  text-transform: capitalize;
 }
 
 .status.active {

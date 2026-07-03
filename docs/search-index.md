@@ -67,4 +67,4 @@ The index stores a source fingerprint derived from `state_5.sqlite`, `sessions/*
 
 The browser uses stale-while-revalidate startup behavior: the thread table reads the existing index immediately when one is present, while diagnostics refresh freshness in the background. This keeps the first screen useful even when a full fingerprint check or visibility probe is slow.
 
-The current `active` status means a thread has an unarchived SQLite row and an existing rollout file. It does not yet prove that Codex Desktop currently shows that thread in the sidebar.
+The UI labels the current `active` status as `Local active`: a thread has an unarchived SQLite row and an existing rollout file. It does not prove that Codex Desktop currently shows that thread in the sidebar.

@@ -22,7 +22,9 @@ Then open:
 http://127.0.0.1:8976
 ```
 
-The first screen shows summary badges for total threads, total projects, and active indexed threads, followed by separate filters for thread names, content previews, project paths, and restoration status.
+The first screen shows summary badges for total threads, total projects, and local active threads, followed by separate filters for thread names, content previews, project paths, and restoration status.
+
+`Local active` means the thread has unarchived local Codex state plus an active rollout file. It does not prove that Codex Desktop currently shows the thread in the sidebar; use visibility diagnostics for that narrower app-level check.
 
 On startup, the browser renders thread results from the existing local index first, then refreshes index freshness and diagnostics in the background. Visibility diagnostics are intentionally user-triggered because they may call slow or unavailable Codex surfaces.
 
