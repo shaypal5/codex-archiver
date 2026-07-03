@@ -192,6 +192,12 @@ h2 {
   font-size: 13px;
 }
 
+#result-count.is-error {
+  color: #8a2b17;
+  font-size: 14px;
+  font-weight: 700;
+}
+
 .result-actions {
   align-items: center;
   display: flex;
@@ -420,6 +426,46 @@ th {
 
 td {
   font-size: 13px;
+}
+
+.table-error {
+  align-items: flex-start;
+  background: #ffe7e0;
+  border: 1px solid #f2b5a4;
+  border-radius: 8px;
+  color: #8a2b17;
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+}
+
+.table-error-icon {
+  align-items: center;
+  background: #b2331b;
+  border-radius: 999px;
+  color: white;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 16px;
+  font-weight: 800;
+  height: 28px;
+  justify-content: center;
+  line-height: 1;
+  width: 28px;
+}
+
+.table-error strong {
+  display: block;
+  font-size: 16px;
+  line-height: 1.25;
+  margin-bottom: 4px;
+}
+
+.table-error p {
+  color: #6f2819;
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .thread-title {

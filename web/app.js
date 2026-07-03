@@ -91,6 +91,7 @@ async function rebuild() {
 
 async function loadThreads() {
   elements.resultCount.textContent = "Loading threads...";
+  elements.resultCount.classList.remove("is-error");
   const params = new URLSearchParams();
   setParam(params, "title", elements.title.value);
   setParam(params, "content", elements.content.value);
@@ -101,12 +102,13 @@ async function loadThreads() {
   params.set("cache", "1");
   try {
     const data = await fetchJson(`/api/threads?${params.toString()}`);
-    renderSummary(data);
+    renderStats(data.stats);
     renderThreads(data.threads);
     renderPagination(data);
     renderSelectionState();
   } catch (error) {
     elements.resultCount.textContent = "Thread loading failed.";
+    elements.resultCount.classList.add("is-error");
     renderThreadError(error);
   }
 }
@@ -124,20 +126,30 @@ async function loadVisibility() {
 }
 
 function renderSummary(data) {
-  elements.totalThreads.textContent = number(data.stats.totalThreads);
-  elements.totalProjects.textContent = number(data.stats.totalProjects);
-  elements.activeThreads.textContent = number(data.stats.activeThreads);
-  elements.scanMeta.textContent = `Indexed ${data.codexHome} at ${new Date(
-    data.scannedAt,
-  ).toLocaleString()}`;
+  renderStats(data.stats);
+  if (!data.codexHome || !data.scannedAt) {
+    return;
+  }
+  const diagnostics = Array.isArray(data.diagnostics) ? data.diagnostics : [];
+  const rebuiltAt = new Date(data.scannedAt);
+  const rebuiltLabel = Number.isNaN(rebuiltAt.valueOf())
+    ? data.scannedAt
+    : rebuiltAt.toLocaleString();
+  elements.scanMeta.textContent = `Indexed ${data.codexHome} at ${rebuiltLabel}`;
   elements.diagnostics.replaceChildren(
-    ...data.diagnostics.map((diagnostic) => {
+    ...diagnostics.map((diagnostic) => {
       const item = document.createElement("div");
       item.className = `diagnostic ${diagnostic.level}`;
       item.textContent = diagnostic.message;
       return item;
     }),
   );
+}
+
+function renderStats(stats) {
+  elements.totalThreads.textContent = number(stats.totalThreads);
+  elements.totalProjects.textContent = number(stats.totalProjects);
+  elements.activeThreads.textContent = number(stats.activeThreads);
 }
 
 function renderDiagnosticsError(error) {
@@ -148,7 +160,20 @@ function renderThreadError(error) {
   const row = document.createElement("tr");
   const cell = document.createElement("td");
   cell.colSpan = 6;
-  cell.textContent = error instanceof Error ? error.message : String(error);
+  const wrapper = document.createElement("div");
+  wrapper.className = "table-error";
+  const icon = document.createElement("span");
+  icon.className = "table-error-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = "!";
+  const copy = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = "Thread loading failed";
+  const detail = document.createElement("p");
+  detail.textContent = error instanceof Error ? error.message : String(error);
+  copy.append(title, detail);
+  wrapper.append(icon, copy);
+  cell.append(wrapper);
   row.append(cell);
   elements.threads.replaceChildren(row);
 }
