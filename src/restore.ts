@@ -2256,7 +2256,10 @@ function isIgnoredCodexHelperProcess(normalizedCommand: string): boolean {
     normalizedCommand.includes("browser_crashpad_handler") ||
     normalizedCommand.includes("crashpad_handler") ||
     normalizedCommand.includes("crashpad-handler") ||
-    normalizedCommand.includes("--type=crashpad")
+    normalizedCommand.includes("--type=crashpad") ||
+    (normalizedCommand.includes("/plugins/cache/openai-bundled/chrome/") &&
+      normalizedCommand.includes("/extension-host/")) ||
+    normalizedCommand.includes("codex for chrome chrome-extension://")
   );
 }
 
