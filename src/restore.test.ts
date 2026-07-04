@@ -147,6 +147,21 @@ test("codex process detection ignores crashpad helpers but keeps real codex proc
   });
 });
 
+test("codex process detection ignores bundled browser extension hosts", () => {
+  assert.equal(
+    matchCodexProcess(
+      30919,
+      "/Users/shaypalac /Users/shaypalachy/.codex/plugins/cache/openai-bundled/chrome/latest/extension-host/macos/arm64/Codex for Chrome chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg/",
+    ),
+    null,
+  );
+  assert.deepEqual(matchCodexProcess(124, "/Applications/Codex.app/Contents/Resources/codex app-server"), {
+    pid: 124,
+    command: "/Applications/Codex.app/Contents/Resources/codex app-server",
+    matchedBy: "Codex app-server",
+  });
+});
+
 test("restore planner flags active target conflicts for future apply candidates", async (t) => {
   if (!hasSqliteCli()) {
     t.skip("sqlite3 CLI is required for restore planner tests");
